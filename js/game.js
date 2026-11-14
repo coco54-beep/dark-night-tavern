@@ -839,6 +839,29 @@ function genreConflictLine(state){
   const p = genreConflictProfile(state);
   return "【类型冲突】本故事按「"+p.label+"」设置冲突：事件应来自"+p.beat+"。"+p.avoid+"冲突要接在已发生的人物、地点和选择上，并改变玩家眼前的目标或关系。";
 }
+function genreMoralityLine(state){
+  if(isRomanceMode(state)){
+    return "【道德基线】人是复杂的，不要把所有 NPC 写成道德圣人。恋爱类型里的道德更多体现在忠诚、边界、诚实与承担，而不是一律善良；角色可以有自私、占有欲、旧错或灰色过去。";
+  }
+  const genre = state.genre || "";
+  const profiles = {
+    "武侠": "江湖不是现代法治社会。侠客守的是自己的义，不是官府律法；镖师、捕快、杀手、山贼、帮派各有底线，杀人、灭口、寻仇在这个类型里可以是真实选项。NPC 是否动手取决于关系、命令、利益、威胁和后果，不会仅因「杀人不对」就集体拒绝。moral 0 只是中性，不要默认 60 以上；侠客可有 10~50，冷血杀手/山贼可为负值。",
+    "末日": "生存压力会压低道德门槛。抢物资、弃伤者、先开枪都可能发生；不要把幸存者写成互相礼让的圣人。moral 可普遍偏低，只有少数人仍坚持底线。",
+    "恐怖": "恐惧会让人自私、撒谎、推别人出去挡刀。NPC 不一定高尚，也不一定勇敢；moral 高低只影响他们在危机中先救谁。",
+    "悬疑": "嫌疑人、证人、警察和罪犯都有各自的道德底线。不要默认所有 NPC 都配合调查或拒绝暴力；有人会撒谎、灭口、收钱闭嘴。",
+    "奇幻": "不同种族、教会、佣兵团和宫廷有自己的道德秩序。善神信徒也可能排外，傭兵可以为钱杀人；不要用统一现代道德衡量所有人。",
+    "科幻": "公司、殖民地、AI 和佣兵有自己的规则。违约、回收、清除证人可能是职业行为；道德高低不等于是否守法或是否服从命令。",
+    "日常": "可以温和，但人物仍有私心、偏见和难处；不要把所有冲突都写成礼貌退让。"
+  };
+  const text = profiles[genre] || "这个世界有自己的法律、阶层和生存规则，人物有不同道德底线。不要默认所有 NPC 都道德高尚，也不要用现代道德观强行阻止符合时代与身份的暴力、欺骗或灰色行为；moral 0 是中性，不是坏人值。";
+  return "【道德基线】"+text+" moral 只影响角色对伤害、欺骗和杀戮的心理门槛，不等于「好人值」；低道德角色会主动作恶，高道德角色也可能因立场、命令或恐惧而动手。";
+}
+
+function genreCombatLine(state){
+  const p = typeof combatProfileFor==="function" ? combatProfileFor(state) : null;
+  if(!p) return "";
+  return "【武力与绝技系统】本故事有明确的武力体系："+p.power+"、"+p.energy+"与"+p.technique+"。玩家首次开场用 playerCombat:{power,energy,energyMax,techniques:[{name,desc,cost,power}]} 初始化；主要人物首次登场用 characters[].combat 给出各自不同的武力和至少一项拿手招式。绝技不是人人都会，消耗"+p.energy+"且有代价/冷却；普通人可以不会武功，但高手、镖师、杀手、门派弟子应该有明显武力。切磋、追杀、护人、偷袭等用 check:{attr:\"武力\"} 或具体技能裁定，按双方武力、伤势、准备和环境计算，不要让所有 NPC 都拒绝使用武力；effects 可用 qi 扣内力、combatPower 调整武力。武力差距必须体现在结果里：差 20 以上要有明显优劣，差 40 以上低手正面硬拼应近乎必败；绝技可以越级但必须有内力消耗、伤势或后患，绝不能让普通人和高手五五开。";
+}
 
 /* 随机剧本的叙事骨架：让不同局的故事结构不同，降低「打听—线索—暗线」的重复感 */
 const STORY_TEMPLATES = [
@@ -1537,7 +1560,7 @@ function startJourney(world,openOnEntry = true){
   undoStack = [];
   if(autoImageAbort){ autoImageAbort.abort(); autoImageAbort = null; }
   journeyOwner = AUTH.username;
-  const inferredGenre = world.genre || (world.text ? guessImportGenre(world.text) : "");
+  const inferredGenre = world.genre || (world.text ? (guessImportGenre(world.text) || guessGenre(world.text)) : "");
   S = {...DEFAULT_STATE(),ai:true,infiniteMode:Boolean(world.infiniteMode),species:world.species||(world.role&&world.role.species)||"",world:world.text||"",worldSource:world.source||"",worldName:world.name||world.title||"",worldStart:world.worldStart||"",worldRole:world.role||null,worldSummary:world.summary||"",worldWindow:world.windowStart||0,worldId:world.id,bookId:world.bookId||"",builtinId:world.builtinId||"",genre:inferredGenre};
   activeBuiltinBible = S.builtinId && world.bible ? world.bible : null;
   S.romanceMode = computeRomanceMode(S);

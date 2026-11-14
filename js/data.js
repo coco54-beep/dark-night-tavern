@@ -96,6 +96,7 @@ const DEFAULT_STATE = () => ({
   charm: 50,       // 魅力 0~100：好感、亲密、说服、骗术、外貌
   willpower: 50,   // 意志 0~100：抗恐吓、抗诱惑、抗酷刑、抗恐惧
   agility: 50,     // 敏捷 0~100：反应、闪避、潜行、逃跑
+  combat: null,    // 武力系统：{mode,power,energy,energyMax,techniques}
   hpMax: 100,      // 体力上限（由体质决定）
   health: 100,     // 健康 0~100：伤病、中毒、后遗症，低于阈值会虚弱
   debt: 0,         // 债务：欠别人的钱
@@ -707,6 +708,11 @@ function refreshSide(){
         +row("体力",(S.hp)+" / "+(S.hpMax||100))
         +row("欲望",DRIVE_KEYS.map(k=>DRIVE_META[k].label+" "+(S.desires?.[k]??0)).join(" · "))
         +row("健康",(S.health??100)+"（"+attrLabel(S.health??100)+"）")
+        +(S.combat ? (function(){
+          const cp = typeof combatProfileFor==="function" ? combatProfileFor(S) : null;
+          const tn = (S.combat.techniques||[]).map(t=>t.name+(t.cost?("（耗"+t.cost+"）"):"")).join("、") || "无";
+          return row(cp?cp.power:"武力",String(S.combat.power||0))+row(cp?cp.energy:"内力",(S.combat.energy||0)+"/"+(S.combat.energyMax||0))+row(cp?cp.technique:"绝技",tn);
+        })() : "")
         +((S.debt||0)>0 ? row("欠债",S.debt+" "+curName(S)) : "")
         +row("技能",Object.keys(S.skills||{}).length
           ? Object.entries(S.skills).map(([k,v])=>k+" "+v+"（"+skillLevel(v)+"）").join("、") : "无")
@@ -724,7 +730,7 @@ function refreshSide(){
           : (avatarFile
             ? '<img class="npc-avatar" src="avatars/'+encodeURIComponent(avatarFile)+'" alt="" loading="lazy">'
             : '<div class="npc-avatar npc-avatar-fallback">'+escapeHtml(String(c.name).slice(0,1))+'</div>');
-        const meta = [c.species,c.tie,c.job,c.attitude].filter(Boolean).join(" · ");
+        const meta = [c.species,c.tie,c.job,c.attitude,c.combat ? ("武力 "+c.combat.power) : ""].filter(Boolean).join(" · ");
         return '<div class="npc-card">'+avatar+'<div class="npc-info"><div class="npc-name">'+escapeHtml(c.name)+'</div><div class="npc-meta">'+escapeHtml(meta||"…")+'</div></div><button type="button" class="npc-gen" data-gen-avatar="'+escapeHtml(c.name)+'">'+(c.avatarKey?"重生成":"生成头像")+'</button></div>';
       }).join("");
       body.innerHTML = selfAttrs

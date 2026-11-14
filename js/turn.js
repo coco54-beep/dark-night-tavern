@@ -392,6 +392,7 @@ async function aiTurn(choice){
     if(scene.playerOrigin) state.origin = scene.playerOrigin;
     if(scene.playerAppearance) state.appearance = scene.playerAppearance;
     if(scene.playerOutfit) state.outfit = scene.playerOutfit;
+    if(scene.playerCombat) state.combat = scene.playerCombat;
     if(!state.turn){
       if(!state.gender && scene.playerGender) state.gender = scene.playerGender;
       if(!state.species && scene.playerSpecies) state.species = scene.playerSpecies;
