@@ -1,0 +1,38 @@
+# 本地数据与密钥
+/data/
+.env
+*.local
+*.secret
+
+# 用户导入的书、圣经与备份
+/worlds_data/*
+!/worlds_data/.gitkeep
+/worlds_data_unused/
+
+# 构建产物
+/apk/
+*.apk
+*.aab
+/node_modules/
+/dist/
+/build/
+*.log
+
+# 个人与临时文件
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
+*.epub
+*.pdf
+*.zip
+*.png
+*.jpg
+!/avatars/*.jpg
+!/avatars/avatars.js
+!/avatars/avatars.json
+*.jpeg
+*.webp
+/assets_check.txt
+/apk_*.txt
+/probe*
