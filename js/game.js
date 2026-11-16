@@ -300,11 +300,136 @@ function sceneMoment(){
   };
 }
 function sceneImagePrompt(){
-  const cfg = imageCfg();
   const m = sceneMoment();
   return ("cinematic narrative scene, exactly this story beat: "
-    +[m.scene,m.plot.conflict,m.moment,m.place,m.weather,m.time,m.present.join("，")].filter(Boolean).join(", ")
-    +", "+cfg.style).replace(/\s+/g," ").trim();
+    +[m.scene,m.plot.conflict,m.moment,m.place,m.weather,m.time,m.present.join("、")].filter(Boolean).join(", ")).replace(/\s+/g," ").trim();
+}
+function sceneCulture(){
+  const text = [S.genre,S.worldName,S.worldStart,S.environment?.era,S.environment?.background].filter(Boolean).join(" ");
+  if(/武侠|江湖|中原|江南|古代|王朝|镖局|门派|官府|架空/.test(text)) return "ancient Chinese";
+  if(/欧洲|中世纪|骑士|城堡|王国/.test(text)) return "medieval European";
+  if(/科幻|未来|星舰|赛博|太空/.test(text)) return "science fiction";
+  if(/现代|都市|当代|日常/.test(text)) return "contemporary";
+  return "period-appropriate";
+}
+function sceneTimeOfDay(){
+  const minute = Number.isFinite(S.environment?.minute) ? ((S.environment.minute % 1440)+1440)%1440 : 12*60;
+  if(minute < 5*60) return "pre-dawn night";
+  if(minute < 11*60) return "morning";
+  if(minute < 17*60) return "afternoon";
+  if(minute < 19*60) return "dusk";
+  return "night, warm lantern light";
+}
+function sceneWeatherEn(){
+  const w = String(S.environment?.weather||"");
+  if(/暴雨|大雨/.test(w)) return "heavy rain, wet streets";
+  if(/雨/.test(w)) return "light rain, wet stone street";
+  if(/雪/.test(w)) return "snow";
+  if(/雾/.test(w)) return "fog";
+  if(/风/.test(w)) return "windy";
+  return w ? "weather: "+w : "";
+}
+function scenePeopleClause(){
+  const positions = ["left foreground","right foreground","center foreground","background left","background right"];
+  const people = (S.present||[]).slice(0,5).map((name,index)=>{
+    const c = (S.cast||[]).find(x=>x && x.name===name);
+    if(!c) return (positions[index]||"foreground")+": "+name;
+    const gender = /女/.test(c.gender||"") ? "woman" : /男/.test(c.gender||"") ? "man" : "person";
+    const role = /掌柜|老板|店主/.test([c.job,c.identity].filter(Boolean).join(" ")) ? "shop owner"
+      : /脚夫|搬|苦力/.test([c.job,c.identity].filter(Boolean).join(" ")) ? "porter"
+      : /伙计|小二|跑堂/.test([c.job,c.identity].filter(Boolean).join(" ")) ? "shop assistant"
+      : /守卫|兵|捕快|差役/.test([c.job,c.identity].filter(Boolean).join(" ")) ? "guard"
+      : /医|郎中/.test([c.job,c.identity].filter(Boolean).join(" ")) ? "doctor"
+      : "local resident";
+    const ageWord = Number(c.age)>=40 ? "middle-aged" : Number(c.age)<=24 ? "young adult" : "";
+    const who = [c.age?c.age+" years old":"", ageWord, sceneCulture()==="ancient Chinese"?"Chinese":"", gender, role,
+      c.appearance, c.outfit].filter(Boolean).join(", ");
+    return (positions[index]||"foreground")+": "+who;
+  }).filter(Boolean);
+  if(!people.length) return "no people visible, only the environment";
+  if(people.length===1) return "single subject, exactly 1 person visible: "+people[0]+"; full body and face visible";
+  return "TWO-SHOT GROUP COMPOSITION. exactly "+people.length+" people in the same frame, all clearly visible and interacting: "+people.join(" | ")+"; do not omit any character; no crowd";
+}
+function finalizeScenePrompt(prompt){
+  const m = sceneMoment();
+  const cfg = imageCfg();
+  const style = String(cfg.style||"").replace(/\bdark background\b/ig,"").replace(/\bnatural skin texture\b/ig,"natural textures").trim();
+  const clean = String(prompt||"")
+    .replace(/\b(japanese|kimono|shrine|torii|tatami|anime|manga|ukiyo-e)\b/ig,"")
+    .replace(/\s+/g," ").trim();
+  const count = (S.present||[]).length;
+  const lead = count>1 ? ("TWO MEN IN FRAME, " + count + " PEOPLE TOGETHER. ") : "";
+  const anchors = [
+    "cinematic photorealistic narrative scene, film still",
+    m.scene ? "story moment: "+m.scene : "",
+    "setting: "+(m.place||"period-appropriate location")+(m.era?(", "+m.era):""),
+    "culture: "+sceneCulture()+", period-accurate architecture and clothing",
+    "time of day: "+sceneTimeOfDay(),
+    sceneWeatherEn(),
+    scenePeopleClause(),
+    m.moment ? "visible action: "+m.moment.slice(-420) : "",
+    style,
+    "35mm lens, eye level, medium-wide composition, natural light, high detail",
+    "no text, no signage, no calligraphy, no banners, no watermark"
+  ].filter(Boolean).join(". ");
+  return (lead+anchors+". "+(clean||"")).replace(/\s+/g," ").slice(0,1600);
+}
+function shortScenePrompt(){
+  const m = sceneMoment();
+  const culture = sceneCulture();
+  const people = (S.present||[]).slice(0,5).map(name=>{
+    const c = (S.cast||[]).find(x=>x && x.name===name);
+    if(!c) return name;
+    const gender = /女/.test(c.gender||"") ? "woman" : /男/.test(c.gender||"") ? "man" : "person";
+    const roleText = [c.job,c.identity].filter(Boolean).join(" ");
+    const isOwner = /掌柜|老板|店主/.test(roleText);
+    const isPorter = /脚夫|搬|苦力/.test(roleText);
+    const role = isOwner ? "shop owner" : isPorter ? "porter"
+      : /伙计|小二|跑堂/.test(roleText) ? "shop assistant" : /守卫|兵|捕快|差役/.test(roleText) ? "guard" : "local resident";
+    const outfit = isPorter ? "short hemp tunic and straw sandals"
+      : isOwner ? "dark blue cotton long robe"
+      : "period Chinese clothing";
+    const pose = isOwner ? "behind the wooden counter" : isPorter ? "standing near the doorway" : "standing nearby";
+    const age = Number(c.age)>=40 ? "middle-aged" : Number(c.age)<=24 ? "young" : "";
+    return [age, culture==="ancient Chinese"?"Chinese":"", gender, role, "in", outfit, pose].filter(Boolean).join(" ");
+  });
+  const count = people.length;
+  const time = sceneTimeOfDay();
+  const weather = sceneWeatherEn();
+  const rawPlace = String(m.place||"");
+  const isShop = /茶馆|茶楼|客栈|酒馆|酒楼|店|铺|摊|码头|渡口/.test(rawPlace);
+  let place = rawPlace;
+  if(culture==="ancient Chinese"){
+    if(/茶馆|茶楼/.test(rawPlace)) place = "an ancient Chinese teahouse with a wooden counter, red lanterns and wet stone street";
+    else if(/客栈|酒馆|酒楼/.test(rawPlace)) place = "an ancient Chinese inn with wooden beams, red lanterns and wet stone street";
+    else if(/码头|渡口|河|江/.test(rawPlace)) place = "an ancient Chinese riverside dock with wooden piers, wet stone street and lantern light";
+    else if(/仓|货栈/.test(rawPlace)) place = "an ancient Chinese warehouse with wooden crates and dim lantern light";
+    else if(/街|巷/.test(rawPlace)) place = "an old Chinese street with wooden shopfronts and wet stone pavement";
+    else if(/山|林/.test(rawPlace)) place = "an ancient Chinese mountain forest, period-accurate environment";
+    else if(/船|舟/.test(rawPlace)) place = "a wooden Chinese river boat on dark water";
+    else if(/官府|衙门|牢/.test(rawPlace)) place = "an ancient Chinese government office with dark wooden beams";
+    else if(/院|房|屋/.test(rawPlace)) place = "an ancient Chinese courtyard house with wooden lattice windows";
+    else place = "an ancient Chinese period setting";
+  }
+  if(!place) place = "the scene";
+  const atmosphere = isShop ? "red lanterns, warm lantern light, wet stone street" : "period-accurate environment, natural light";
+  if(!count){
+    return ["empty", place, "at", time, weather, atmosphere, "cinematic wide shot, photorealistic, no people"].filter(Boolean).join(", ");
+  }
+  const subject = count===1
+    ? people[0]+", face visible, full body"
+    : (count===2 ? "two-shot of exactly 2 people: " : "group shot of exactly "+count+" people: ")
+      + people.join(" and ")+", facing each other, faces visible in three-quarter view, all fully in frame";
+  return ["cinematic photorealistic wide shot", subject, "in", place, "at", time, weather,
+    culture+" architecture and clothing, "+atmosphere].filter(Boolean).join(", ");
+}
+function sceneNegative(){
+  let base = IMG_NEG + ", text, signage, calligraphy, banners, labels, watermark, logo, extra people, missing character, duplicate face, empty establishing shot, empty room, landscape only, close-up portrait";
+  if((S.present||[]).length>1) base += ", solo, single person, one person only, back to camera, facing away, rear view";
+  if(sceneCulture()==="ancient Chinese"){
+    base += ", japanese architecture, kimono, shrine, torii, tatami, japanese lanterns, japanese characters, samurai, ukiyo-e, modern buildings, power lines, electric wires, concrete city, cars, neon signs";
+  }
+  return base;
 }
 function npcNegative(c){
   const raw = String(c && c.species || "");
@@ -387,10 +512,11 @@ async function generateSceneImage({signal=null}={}){
   if(signal && signal.aborted) throw aborted();
   const moment = sceneMoment();
   const sig = seedOf(JSON.stringify({turn:S.turn,scene:S.scene,plot:S.plot,moment:moment.moment.slice(-700),place:moment.place}));
-  const key = "scene:"+(S.worldId||"local")+":"+(S.turn||0)+":"+sig;
-  const prompt = await visualPrompt(null,"scene");
+  const variation = Date.now().toString(36).slice(-5)+Math.random().toString(36).slice(2,5);
+  const key = "scene:"+(S.worldId||"local")+":"+(S.turn||0)+":"+sig+":"+variation;
+  const prompt = shortScenePrompt();
   if(signal && signal.aborted) throw aborted();
-  const data = await comfyGenerate(prompt,{w:1216,h:832,seed:seedOf(key),signal});
+  const data = await comfyGenerate(prompt,{w:1216,h:832,negative:sceneNegative(),seed:seedOf(key),signal});
   if(signal && signal.aborted) throw aborted();
   await imagePut(key,data);
   if(signal && signal.aborted) throw aborted();
@@ -480,7 +606,7 @@ function showSettings(){
       <label class="check-line"><input type="checkbox" id="settings-idle-auto" ${idleAutoEnabled()?"checked":""}> 90 秒无操作自动推进剧情（关闭后不会超时结束）</label>
       <label class="check-line"><input type="checkbox" id="settings-story-full" ${storyDetailFull()?"checked":""}> 每幕使用完整叙事规则（更细，切换后下一幕生效）</label>
       <label class="check-line"><input type="checkbox" id="settings-semantic" ${semanticMemoryEnabled()?"checked":""}> 本地语义记忆（首次开启需加载模型，会稍慢）</label>
-      <label class="check-line"><input type="checkbox" id="settings-memory-first" ${memoryFirstEnabled()?"checked":""}> 记忆优先模式（缩短历史上下文，主要依赖数据库召回）</label>
+      <label class="check-line"><input type="checkbox" id="settings-memory-first" ${(typeof memoryFirstForState==="function"?memoryFirstForState(S):memoryFirstEnabled())?"checked":""}> 记忆优先模式（缩短历史上下文，主要依赖数据库召回；长篇自动开启）</label>
       <p class="form-note" id="settings-note" role="status"></p>
       <div class="card-btns">
         <button class="big-btn" id="settings-back">返回酒馆</button>
@@ -727,6 +853,7 @@ $("btn-scene-img").onclick = async ()=>{
         await saveQueue;
         await api("/api/worlds/delete",{method:"POST",body:{id:btn.dataset.id},token:owner});
         if(typeof dbDeleteWorld==="function") dbDeleteWorld(btn.dataset.id).catch(()=>{});
+        if(typeof deleteTimelineSnapshots==="function") deleteTimelineSnapshots(btn.dataset.id);
         if(!stillHere()) return;
         if(S.worldId===btn.dataset.id) S = DEFAULT_STATE();
         showTitle();
@@ -1652,6 +1779,7 @@ function startJourney(world,openOnEntry = true){
   const inferredGenre = world.genre || (world.text ? (guessImportGenre(world.text) || guessGenre(world.text)) : "");
   S = {...DEFAULT_STATE(),ai:true,infiniteMode:Boolean(world.infiniteMode),species:world.species||(world.role&&world.role.species)||"",world:world.text||"",worldSource:world.source||"",worldName:world.name||world.title||"",worldStart:world.worldStart||"",worldRole:world.role||null,worldSummary:world.summary||"",worldWindow:world.windowStart||0,worldId:world.id,bookId:world.bookId||"",builtinId:world.builtinId||"",genre:inferredGenre};
   activeBuiltinBible = S.builtinId && world.bible ? world.bible : null;
+  if(typeof ensureTimelineState==="function") ensureTimelineState(S);
   S.romanceMode = computeRomanceMode(S);
   if(!world.role){
     const attrs = rollStartingAttrs();
@@ -1853,6 +1981,7 @@ async function loadWorld(id,stillHere){
   S = {...DEFAULT_STATE(),...save,ai:true,infiniteMode:save.infiniteMode ?? Boolean(world.infiniteMode),species:save.species||(world.role&&world.role.species)||"",world:save.world||world.text||"",worldSource:world.source||"",worldName:world.name,worldId:id,builtinId:world.builtinId||""};
   undoStack = [];
   activeBuiltinBible = S.builtinId && world.bible ? world.bible : null;
+  if(typeof ensureTimelineState==="function") ensureTimelineState(S);
   const selfName = String(S.playerIdentity?.name || S.worldRole?.name || "").trim();
   if(selfName){
     S.cast = (S.cast||[]).filter(c=>c && c.name!==selfName);

@@ -113,6 +113,7 @@ const DEFAULT_STATE = () => ({
   willpower: 50,   // 意志 0~100：抗恐吓、抗诱惑、抗酷刑、抗恐惧
   agility: 50,     // 敏捷 0~100：反应、闪避、潜行、逃跑
   combat: null,    // 武力系统：{mode,power,energy,energyMax,techniques}
+  martialTraining: {},
   hpMax: 100,      // 体力上限（由体质决定）
   health: 100,     // 健康 0~100：伤病、中毒、后遗症，低于阈值会虚弱
   debt: 0,         // 债务：欠别人的钱
@@ -150,6 +151,9 @@ const DEFAULT_STATE = () => ({
   cast: [],        // 人物档案、所知、关系变化和最近行动
   present: null,   // 人物姓名列表。旧存档在下一幕补齐
   plot: {},        // {goal, conflict, next}
+  timelineId: "main", // 当前时间线
+  timelines: [],      // [{id,name,parentId,branchTurn,branchMinute,createdAt,color}]
+  timelineSeq: 0,
   chapter: null,   // 当前篇章 {title,goal,stakes,next,phase,startedTurn,startedMinute,titleMinute}
   lastTitleNudgeMinute: null,
   sceneHistory: [], // 最近场景 [{turn,place,scene,advance,summary}]
@@ -157,6 +161,8 @@ const DEFAULT_STATE = () => ({
   loopSeq: 0,
   lastLoopNudgeMinute: null,
   loopHistory: [], // 已收回的未了事项
+  chapterHistory: [],
+  locations: [],
   environment: {minute:null,startDate:null,era:"",background:"",place:"",weather:"",conditions:""},
   weatherState: null, // 本地天气：同一地点同一天保持一致
   consequences: [], // 玩家决定留下的事实，以及尚未发生的后续
@@ -184,6 +190,8 @@ const DEFAULT_STATE = () => ({
   keyFacts: [],      // 不可遗忘的重大事实：死亡/婚姻/破产/失踪等
   lifeEvents: [],
   lifeReactions: [],
+  investigation: {clues:[],checks:[]},
+  genreGame: null,
   idleTimeout: 90,   // 玩家沉默多久（秒）触发超时推进
   idleCount: 0,      // 已发生的超时次数（AI 内部，用于累积后果）
   noNagUntil: 0,     // 「拒绝冷却」：在此幕之前，AI 不得再提玩家拒绝过的请求
@@ -648,12 +656,13 @@ function refreshStats(){
                     : "linear-gradient(90deg,var(--red),#e07050)";
   const status = $("world-status");
   const env = S.environment;
-  status.textContent = S.ai ? [formatClock(S),env.place,env.weather].filter(Boolean).join(" · ")
+  status.textContent = S.ai ? [formatClock(S),env.place,env.weather,"时间线："+timelineLabel(S)].filter(Boolean).join(" · ")
     : formatStoryTime(env.minute,S);
   status.hidden = !status.textContent;
 }
 
 function refreshSide(){
+  if(typeof ensureTimelineState==="function") ensureTimelineState(S);
   const body = $("side-body");
   const tab = document.querySelector(".side-tab.active").dataset.tab;
   if(S.ai){
@@ -867,6 +876,7 @@ function refreshSide(){
           const tn = (S.combat.techniques||[]).map(t=>t.name+(t.cost?("（耗"+t.cost+"）"):"")).join("、") || "无";
           return row(cp?cp.power:"武力",String(S.combat.power||0))+row(cp?cp.energy:"内力",(S.combat.energy||0)+"/"+(S.combat.energyMax||0))+row(cp?cp.technique:"绝技",tn);
         })() : "")
+        +(combatProfileFor(S)?.id==="wuxia" ? row("修习进度",martialTrainingText(S)) : "")
         +((S.debt||0)>0 ? row("欠债",S.debt+" "+curName(S)) : "")
         +row("技能",Object.keys(S.skills||{}).length
           ? Object.entries(S.skills).map(([k,v])=>k+" "+v+"（"+skillLevel(v)+"）").join("、") : "无")
@@ -932,9 +942,44 @@ function refreshSide(){
       const ch = S.chapter || null;
       const loops = (S.openLoops||[]).slice(-8).reverse();
       const closed = (S.loopHistory||[]).slice(-5).reverse();
+      const tls = S.timelines || [];
+      const ordered = typeof orderedTimelines==="function" ? orderedTimelines(S) : tls.map(t=>({t,depth:0}));
+      const currentSummary = {
+        turn:S.turn||0, scene:S.scene||"", chapter:S.chapter?.title||"未建立篇章",
+        coin:S.coin, hp:S.hp, cast:(S.cast||[]).length, loops:(S.openLoops||[]).length
+      };
+      const timelineRows = ordered.map(({t,depth})=>{
+        const parent = tls.find(x=>x.id===t.parentId);
+        const snap = typeof timelineSnapshotSummary==="function" ? timelineSnapshotSummary(S,t.id) : null;
+        const meta = [t.id===S.timelineId?"当前":"", t.parentId?("第"+(t.branchTurn??"?")+"幕从「"+(parent?.name||"上级线")+"」分叉"):"起点", snap?("存档第 "+snap.turn+" 幕"):"尚无独立快照"].filter(Boolean).join(" · ");
+        return '<div class="tl-node'+(t.id===S.timelineId?' active':'')+'" style="padding-left:'+(6+depth*14)+'px">'
+          +'<button class="tl-open" data-timeline="'+escapeHtml(t.id)+'"><span class="tl-name">'+escapeHtml((depth?"└ ":"")+(t.name||"未命名时间线"))+'</span><span class="tl-meta">'+escapeHtml(meta)+'</span></button>'
+          +'<span class="tl-actions"><button class="tl-mini" data-timeline-compare="'+escapeHtml(t.id)+'">对比</button>'
+          +(t.id!=="main"?'<button class="tl-mini danger" data-timeline-delete="'+escapeHtml(t.id)+'">删除</button>':'')+'</span></div>';
+      }).join("");
+      const compare = timelineCompareId && typeof timelineSnapshotSummary==="function" ? timelineSnapshotSummary(S,timelineCompareId) : null;
+      const compareName = tls.find(t=>t.id===timelineCompareId)?.name || "未选择";
+      const compareRow = (label,a,b)=>'<div class="tl-compare-row"><span>'+escapeHtml(label)+'</span><b>'+escapeHtml(String(a??"—"))+'</b><b>'+escapeHtml(String(b??"—"))+'</b></div>';
+      const compareHtml = compare ? '<div class="tl-compare">'
+        +'<div class="tl-compare-head"><span>项目</span><b>当前 · '+(currentTimeline(S)?.name||"")+'</b><b>'+escapeHtml(compareName)+'</b></div>'
+        +compareRow("幕数",currentSummary.turn,compare.turn)
+        +compareRow("场景",currentSummary.scene,compare.scene)
+        +compareRow("篇章",currentSummary.chapter,compare.chapter)
+        +compareRow("金币",currentSummary.coin,compare.coin)
+        +compareRow("体力",currentSummary.hp,compare.hp)
+        +compareRow("人物",currentSummary.cast,compare.cast)
+        +compareRow("未了事项",currentSummary.loops,compare.loops)
+        +'<div class="tl-compare-note">'+escapeHtml(compare.lastText||"")+'</div>'
+        +'<button class="tl-mini" id="tl-compare-clear">清除对比</button></div>' : "";
+      const snapStats = typeof timelineSnapshotStats==="function" ? timelineSnapshotStats(S) : {count:0,bytes:0};
+      const timelineCard = card("时间线", '<div class="tl-list">'+timelineRows+'</div>'
+        +'<button class="big-btn ghost" id="btn-branch-timeline">从当前幕创建分支</button>'
+        +'<div class="tl-storage">本地快照 '+snapStats.count+' 个 · 约 '+Math.max(1,Math.round(snapStats.bytes/1024))+' KB</div>'
+        +compareHtml);
       const chapterCard = ch
-        ? card("当前篇章", row("篇章", ch.title)+row("目标", ch.goal)+row("筹码与代价", ch.stakes)+row("下一步", ch.next)+row("阶段", ch.phase))
+        ? card("当前篇章", row("篇章", ch.title)+row("目标", ch.goal)+row("筹码与代价", ch.stakes)+row("下一步", ch.next)+row("阶段", Object.hasOwn(CHAPTER_PHASES,ch.phase) ? CHAPTER_PHASES[ch.phase] : ch.phase)+row("余波",ch.outcome))
         : card("当前篇章", '<div class="empty">还没有篇章信息。持续几幕或开启新故事后，AI 会建立当前篇章。</div>');
+      const chapterHistory = (S.chapterHistory||[]).slice(-4).reverse().map(c=>row(c.title,c.outcome)).join("");
       const loopCards = loops.length
         ? card("未了事项", '<div class="loop-list">'+loops.map(l=>{
             const ageMinutes = Number.isFinite(l.createdMinute) && Number.isFinite(S.environment?.minute)
@@ -948,9 +993,58 @@ function refreshSide(){
           }).join("")+'</div>')
         : card("未了事项", '<div class="empty">当前没有未了事项。</div>');
       const closedCards = closed.length
-        ? card("最近收回", '<div class="qd">'+closed.map(l=>escapeHtml(l.text||"")+" · 第"+(l.resolvedTurn||"?")+"幕").join("<br>")+'</div>')
+        ? card("最近收回", '<div class="qd">'+closed.map(l=>escapeHtml(l.outcome||l.text||"")+" · 第"+(l.resolvedTurn||"?")+"幕").join("<br>")+'</div>')
         : "";
-      body.innerHTML = chapterCard + loopCards + closedCards;
+      body.innerHTML = timelineCard + chapterCard + (chapterHistory ? card("篇章回顾",chapterHistory) : "") + loopCards + closedCards;
+      body.querySelectorAll("[data-timeline]").forEach(btn=>{
+        btn.onclick = ()=>{
+          if(btn.dataset.timeline===S.timelineId) return;
+          const next = switchTimelineState(S,btn.dataset.timeline);
+          if(!next){ alert("这条时间线的快照丢失了，无法切换。"); return; }
+          S = next;
+          timelineCompareId = "";
+          undoStack = [];
+          renderLog();
+          showCurrentScene();
+          refreshStats();
+          refreshSide();
+          saveProgress();
+        };
+      });
+      body.querySelectorAll("[data-timeline-compare]").forEach(btn=>{
+        btn.onclick = ()=>{ timelineCompareId = btn.dataset.timelineCompare; refreshSide(); };
+      });
+      const compareClear = $("tl-compare-clear");
+      if(compareClear) compareClear.onclick = ()=>{ timelineCompareId = ""; refreshSide(); };
+      body.querySelectorAll("[data-timeline-delete]").forEach(btn=>{
+        btn.onclick = ()=>{
+          const id = btn.dataset.timelineDelete;
+          const meta = (S.timelines||[]).find(t=>t.id===id);
+          if(!meta) return;
+          if(!confirm("删除时间线「"+meta.name+"」及其快照？\n它的子分支会改挂到上一级时间线，已发生的主线/其他分支不会受影响。")) return;
+          if(!deleteTimelineBranch(S,id)){ alert("删除失败：找不到这条时间线。"); return; }
+          timelineCompareId = "";
+          undoStack = [];
+          renderLog();
+          showCurrentScene();
+          refreshStats();
+          refreshSide();
+          saveProgress();
+        };
+      });
+      const branchBtn = $("btn-branch-timeline");
+      if(branchBtn) branchBtn.onclick = ()=>{
+        const name = prompt("新时间线名称", "分支 "+(S.timelines||[]).length);
+        if(name===null) return;
+        createTimelineBranch(S,name);
+        undoStack = [];
+        renderLog();
+        showCurrentScene();
+        refreshStats();
+        refreshSide();
+        saveProgress();
+        imageToast("已创建新时间线："+(S.timelines.find(t=>t.id===S.timelineId)?.name||""),3500);
+      };
     }else{
       const itemCards = S.items.length
         ? card("物品与线索",'<div class="item-list">'+S.items.map((it,i)=>{
@@ -968,8 +1062,11 @@ function refreshSide(){
       )).join("");
       const env = S.environment;
       const conditions = row("时间",formatClock(S))+row("地点",env.place)
-        +row("天气",env.weather)+row("现场情况",env.conditions);
-      const background = row("时代与地区",env.era)+row("背景",env.background);
+        +row("季节",S.weatherState?.season)+row("天气",env.weather)+row("现场情况",env.conditions);
+      const local = locationProfile(S);
+      const background = row("时代与地区",env.era)+row("背景",env.background)
+        +row("地貌与空间",local.terrain)+row("当地势力",local.authority)+row("当地风俗",local.custom)
+        +row("当地规矩",local.rule);
       const totals = S.moneyTotals || {income:0,expense:0};
       const unit = " "+curName(S);
       const cashRows = (S.moneyBook||[]).slice(-10).reverse().map(entry=>
@@ -986,6 +1083,8 @@ function refreshSide(){
         row(reaction.who+" · "+reaction.date,reaction.text)).join("");
       body.innerHTML = card(title,row("第 "+S.turn+" 幕",S.scene||"故事尚未开始")
         +row("主线目标",S.plot.goal)+row("眼前的冲突",S.plot.conflict)+row("下一步",S.plot.next))
+        +(usesInvestigation(S) ? card("证据簿",investigationPanel(S,row)) : "")
+        +renderGenrePanel(S,card,row)
         +(conditions ? card("当前环境",conditions) : "")
         +(background ? card("世界背景",background) : "")
         +(lifeRows ? card("重大事件",'<details><summary>查看已知事件</summary>'+lifeRows+'</details>'
@@ -1009,6 +1108,26 @@ function refreshSide(){
     });
     body.querySelectorAll("[data-use]").forEach(btn=>{
       btn.onclick = ()=> useItem(Number(btn.dataset.use));
+    });
+    body.querySelectorAll("[data-investigate]").forEach(btn=>{
+      btn.onclick = ()=>{
+        if(activeTurn || S.ending) return;
+        const request = {kind:btn.dataset.investigate,id:$("evidence-primary").value,
+          other:$("evidence-other").value,target:$("evidence-target").value};
+        const move = investigationChoice(S,request);
+        if(!move){ $("evidence-status").textContent = "比对须选两条不同线索，对质须选一位在场人物。"; return; }
+        dismissDrawer();
+        aiTurn(move);
+      };
+    });
+    body.querySelectorAll("[data-genre-action]").forEach(btn=>{
+      btn.onclick = ()=>{
+        if(activeTurn || S.ending) return;
+        const move = genreChoices(S)[Number(btn.dataset.genreAction)];
+        if(!move) return;
+        dismissDrawer();
+        aiTurn(move);
+      };
     });
     return;
   }
