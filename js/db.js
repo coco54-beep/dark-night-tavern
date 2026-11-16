@@ -1,0 +1,358 @@
+"use strict";
+/* ==================== 本地长期记忆数据库（IndexedDB） ==================== */
+const TAVERN_DB_NAME = "tavern_memory_v1";
+const TAVERN_DB_VERSION = 1;
+const SEMANTIC_MEMORY_KEY = "tavern_semantic_memory_v1";
+const MEMORY_FIRST_KEY = "tavern_memory_first_v1";
+let tavernDbPromise = null;
+
+function memoryFirstEnabled(){
+  try{ return localStorage.getItem(MEMORY_FIRST_KEY)==="1"; }
+  catch(e){ return false; }
+}
+function setMemoryFirst(on){
+  try{ localStorage.setItem(MEMORY_FIRST_KEY,on?"1":"0"); }catch(e){}
+}
+
+function semanticMemoryEnabled(){
+  try{
+    const raw = localStorage.getItem(SEMANTIC_MEMORY_KEY);
+    return raw===null ? true : raw==="1";
+  }catch(e){ return false; }
+}
+function setSemanticMemory(on){
+  try{ localStorage.setItem(SEMANTIC_MEMORY_KEY,on?"1":"0"); }catch(e){}
+}
+let embedWorkerPromise = null;
+let embedReqId = 0;
+const embedPending = new Map();
+function embedWorkerReady(){
+  if(embedWorkerPromise) return embedWorkerPromise;
+  embedWorkerPromise = new Promise((resolve,reject)=>{
+    try{
+      const worker = new Worker("js/embed-worker.js",{type:"module"});
+      worker.onmessage = event=>{
+        const data = event.data || {};
+        const pending = embedPending.get(data.id);
+        if(!pending) return;
+        embedPending.delete(data.id);
+        clearTimeout(pending.timer);
+        if(data.ok) pending.resolve(data);
+        else pending.reject(new Error(data.error || "语义模型失败"));
+      };
+      worker.onerror = event=>{
+        for(const pending of embedPending.values()){ clearTimeout(pending.timer); pending.reject(new Error("语义模型加载失败")); }
+        embedPending.clear();
+        embedWorkerPromise = null;
+        try{ worker.terminate(); }catch(e){}
+        reject(new Error(event.message || "语义模型加载失败"));
+      };
+      resolve(worker);
+    }catch(e){ embedWorkerPromise = null; reject(e); }
+  });
+  return embedWorkerPromise;
+}
+function embedCall(payload, timeout=180000){
+  return embedWorkerReady().then(worker=>new Promise((resolve,reject)=>{
+    const id = ++embedReqId;
+    const timer = setTimeout(()=>{ embedPending.delete(id); reject(new Error("语义模型超时")); },timeout);
+    embedPending.set(id,{resolve,reject,timer});
+    worker.postMessage({id,...payload});
+  }));
+}
+function embedTexts(texts, timeout){
+  if(!semanticMemoryEnabled()) return Promise.resolve(null);
+  return embedCall({type:"embed",texts},timeout).then(data=>data.vectors).catch(()=>null);
+}
+function warmSemanticMemory(){
+  if(!semanticMemoryEnabled()) return Promise.resolve(false);
+  return embedCall({type:"warm"},180000).then(()=>true).catch(()=>false);
+}
+function cosineSimilarity(a,b){
+  if(!Array.isArray(a) || !Array.isArray(b) || a.length!==b.length) return 0;
+  let dot=0, na=0, nb=0;
+  for(let i=0;i<a.length;i++){ dot+=a[i]*b[i]; na+=a[i]*a[i]; nb+=b[i]*b[i]; }
+  return na && nb ? dot/Math.sqrt(na*nb) : 0;
+}
+
+function tavernDbOpen(){
+  if(tavernDbPromise) return tavernDbPromise;
+  tavernDbPromise = new Promise((resolve,reject)=>{
+    if(typeof indexedDB==="undefined"){ reject(new Error("IndexedDB 不可用")); return; }
+    const req = indexedDB.open(TAVERN_DB_NAME, TAVERN_DB_VERSION);
+    req.onupgradeneeded = ()=>{
+      const db = req.result;
+      if(!db.objectStoreNames.contains("events")){
+        const s = db.createObjectStore("events",{keyPath:"id"});
+        s.createIndex("worldId","worldId",{unique:false});
+        s.createIndex("worldId_turn",["worldId","turn"],{unique:false});
+        s.createIndex("participants","participants",{multiEntry:true});
+      }
+      if(!db.objectStoreNames.contains("memories")){
+        const s = db.createObjectStore("memories",{keyPath:"id"});
+        s.createIndex("worldId","worldId",{unique:false});
+        s.createIndex("name","name",{unique:false});
+        s.createIndex("worldId_turn",["worldId","turn"],{unique:false});
+      }
+      if(!db.objectStoreNames.contains("worlds")){
+        db.createObjectStore("worlds",{keyPath:"worldId"});
+      }
+    };
+    req.onsuccess = ()=>resolve(req.result);
+    req.onerror = ()=>reject(req.error || new Error("数据库打开失败"));
+  });
+  return tavernDbPromise;
+}
+
+function tavernDbStore(db, store, mode, work){
+  return new Promise((resolve,reject)=>{
+    let tx;
+    try{ tx = db.transaction(store, mode); }catch(e){ reject(e); return; }
+    const os = tx.objectStore(store);
+    let result;
+    try{ result = work(os); }catch(e){ reject(e); return; }
+    tx.oncomplete = ()=>resolve(result);
+    tx.onerror = ()=>reject(tx.error || new Error("数据库事务失败"));
+    tx.onabort = ()=>reject(tx.error || new Error("数据库事务中止"));
+  });
+}
+
+function tavernWorldId(state){
+  return String(state?.worldId || state?.builtinId || state?.worldName || "local").slice(0,180);
+}
+
+function tavernHash(text){
+  let h = 0;
+  for(const ch of String(text||"")) h = (h*31 + ch.charCodeAt(0)) | 0;
+  return Math.abs(h).toString(36);
+}
+
+function tavernImportance(text, scene){
+  const s = String(text||"");
+  let n = 2;
+  if(/(帮|修|救|照顾|陪|答应|承诺|欠|人情|约定|期限|改天|下次|以后|未了|还没)/.test(s)) n = 3;
+  if(/(生死|婚|嫁|娶|怀孕|孩子|杀|死|背叛|出卖|永远|一辈子|誓言|救命|断交|决裂)/.test(s)) n = 4;
+  if(scene?.ending) n = 5;
+  return n;
+}
+
+function tavernIsOpen(text){
+  return /(答应|承诺|欠|人情|约定|期限|改天|下次|以后|未了|还没|等|回来|再找|之后再)/.test(String(text||""));
+}
+
+function tavernEventId(worldId, turn){ return worldId+"::"+String(turn); }
+
+async function tavernDbPutEvent(event){
+  try{
+    const db = await tavernDbOpen();
+    await tavernDbStore(db,"events","readwrite",os=>os.put(event));
+    return true;
+  }catch(e){ return false; }
+}
+
+async function tavernDbPutWorld(meta){
+  try{
+    const db = await tavernDbOpen();
+    await tavernDbStore(db,"worlds","readwrite",os=>os.put(meta));
+    return true;
+  }catch(e){ return false; }
+}
+
+async function tavernDbRecentEvents(worldId, limit=320){
+  try{
+    const db = await tavernDbOpen();
+    const list = await tavernDbStore(db,"events","readonly",os=>{
+      const req = os.index("worldId").getAll(worldId);
+      return new Promise((resolve,reject)=>{ req.onsuccess=()=>resolve(req.result||[]); req.onerror=()=>reject(req.error); });
+    });
+    return list.sort((a,b)=>(b.turn||0)-(a.turn||0)).slice(0,limit);
+  }catch(e){ return []; }
+}
+
+async function tavernDbMemories(worldId, names, limit=40){
+  try{
+    const db = await tavernDbOpen();
+    const list = await tavernDbStore(db,"memories","readonly",os=>{
+      const req = os.index("worldId").getAll(worldId);
+      return new Promise((resolve,reject)=>{ req.onsuccess=()=>resolve(req.result||[]); req.onerror=()=>reject(req.error); });
+    });
+    const set = new Set((names||[]).filter(Boolean));
+    return list.filter(m=>m && (!set.size || set.has(m.name)))
+      .sort((a,b)=>(b.turn||0)-(a.turn||0)).slice(0,limit);
+  }catch(e){ return []; }
+}
+
+function tavernKeywordScore(text, event){
+  const t = String(text||"");
+  const hay = [event.summary,event.place,(event.participants||[]).join(" "),event.kind].filter(Boolean).join(" ");
+  let score = 0;
+  for(const kw of ["屋顶","修","答应","承诺","欠","人情","约定","任务","线索","证据","钥匙","账","药","伤","救","帮","婚","爱","背叛","仇","船","货"]){
+    if(hay.includes(kw) && t.includes(kw)) score += 2;
+  }
+  for(const name of (event.participants||[])) if(name && t.includes(name)) score += 3;
+  return score;
+}
+
+async function retrieveRelevantMemory(state, action=""){
+  if(!state || !state.ai) return "";
+  const worldId = tavernWorldId(state);
+  const names = new Set([...(state.present||[])]);
+  const text = [action, state.scene, state.plot?.goal, state.plot?.conflict].filter(Boolean).join(" ");
+  for(const c of (state.cast||[])){
+    if(c && c.name && text.includes(c.name)) names.add(c.name);
+  }
+  const queryText = text.slice(0,500);
+  const [events,memories,queryVecs] = await Promise.all([
+    tavernDbRecentEvents(worldId, 320),
+    tavernDbMemories(worldId, [...names], 40),
+    embedTexts([queryText]).catch(()=>null)
+  ]);
+  const queryVec = queryVecs && queryVecs[0];
+  const scored = (events||[]).filter(e=>e && e.turn<=state.turn).map(e=>{
+    let score = (e.importance||2)*2;
+    if(e.status==="open") score += 3;
+    if((e.participants||[]).some(n=>names.has(n))) score += 4;
+    score += tavernKeywordScore(text,e);
+    if((state.turn||0)-(e.turn||0) <= 12) score += 2;
+    if(queryVec && Array.isArray(e.vector) && e.vector.length===queryVec.length){
+      score += Math.round(Math.max(0,cosineSimilarity(queryVec,e.vector))*30);
+    }
+    return {e,score};
+  }).filter(x=>x.score>=5).sort((a,b)=>b.score-a.score)
+    .slice(0, memoryFirstEnabled() ? 14 : 10);
+  const lines = [];
+  for(const {e} of scored){
+    const who = (e.participants||[]).slice(0,3).join("、");
+    lines.push("- 第"+(e.turn||"?")+"幕"+(who?("（"+who+"）"):"")+"："+String(e.summary||"").slice(0,150));
+  }
+  const memLines = (memories||[]).slice(0, memoryFirstEnabled() ? 14 : 10)
+    .map(m=>"- "+m.name+"（第"+(m.turn||"?")+"幕）："+String(m.text||"").slice(0,120));
+  const out = [];
+  if(lines.length) out.push("【检索到的相关往事（可能已不在最近对话里，必须当作已发生的事实）】\n"+lines.join("\n"));
+  if(memLines.length) out.push("【人物亲历记忆（对应角色应记得）】\n"+memLines.join("\n"));
+  const result = out.join("\n");
+  const maxLen = memoryFirstEnabled() ? 2200 : 1600;
+  return result.length>maxLen ? result.slice(-maxLen) : result;
+}
+
+async function recordTurnToDb(state, scene, choice, turn){
+  if(!state || !state.ai) return;
+  const worldId = tavernWorldId(state);
+  const playerName = String(state.playerIdentity?.name || state.worldRole?.name || "玩家").trim();
+  const summary = String(scene?.summary || scene?.advance || scene?.consequence?.fact || "").trim();
+  if(!summary) return;
+  const participants = [...new Set([
+    ...(state.present||[]),
+    ...(scene?.lines||[]).map(l=>l && l.who),
+    ...(scene?.characters||[]).map(c=>c && c.name)
+  ].filter(n=>n && n!==playerName))].slice(0,12);
+  const text = summary.slice(0,600);
+  const event = {
+    id: tavernEventId(worldId,turn), worldId, turn,
+    minute: Number.isFinite(state.environment?.minute) ? state.environment.minute : null,
+    place: state.environment?.place || "", summary: text,
+    participants,
+    importance: tavernImportance(text,scene),
+    status: tavernIsOpen(text) ? "open" : "closed",
+    kind: scene?.ending ? "ending" : (/修|帮|救/.test(text)?"help":/答应|承诺|约定|欠/.test(text)?"promise":/杀|死|伤|打/.test(text)?"conflict":"event"),
+    keywords: [], createdAt: Date.now()
+  };
+  await tavernDbPutEvent(event);
+  try{
+    const vecs = await embedTexts([text]);
+    if(vecs && vecs[0] && vecs[0].length){
+      event.vector = vecs[0];
+      await tavernDbPutEvent(event);
+    }
+  }catch(e){}
+  try{
+    const db = await tavernDbOpen();
+    for(const name of participants){
+      const mem = {id:worldId+"::"+turn+"::"+tavernHash(name),worldId,name,turn,eventId:event.id,
+        text:text.slice(0,180),importance:event.importance};
+      await tavernDbStore(db,"memories","readwrite",os=>os.put(mem));
+    }
+    await tavernDbPutWorld({worldId,name:state.worldName||"",savedAt:Date.now(),turn});
+  }catch(e){}
+}
+
+async function dbDeleteTurn(worldId, turn){
+  try{
+    const db = await tavernDbOpen();
+    await tavernDbStore(db,"events","readwrite",os=>{
+      const req = os.index("worldId").getAll(worldId);
+      req.onsuccess = ()=>{ for(const e of (req.result||[])) if(e.turn===turn) os.delete(e.id); };
+    });
+    await tavernDbStore(db,"memories","readwrite",os=>{
+      const req = os.index("worldId").getAll(worldId);
+      req.onsuccess = ()=>{ for(const m of (req.result||[])) if(m.turn===turn) os.delete(m.id); };
+    });
+  }catch(e){}
+}
+
+async function dbDeleteWorld(worldId){
+  try{
+    const db = await tavernDbOpen();
+    for(const store of ["events","memories","worlds"]){
+      await tavernDbStore(db,store,"readwrite",os=>{
+        if(store==="worlds"){ os.delete(worldId); return; }
+        const req = os.index("worldId").getAll(worldId);
+        req.onsuccess = ()=>{ for(const x of (req.result||[])) os.delete(x.id); };
+      });
+    }
+  }catch(e){}
+}
+
+async function backfillEmbeddings(worldId, limit=400){
+  if(!semanticMemoryEnabled()) return 0;
+  try{
+    const db = await tavernDbOpen();
+    const events = await tavernDbRecentEvents(worldId, limit);
+    const todo = events.filter(e=>e && !Array.isArray(e.vector));
+    let done = 0;
+    for(let i=0;i<todo.length;i+=6){
+      const batch = todo.slice(i,i+6);
+      const vectors = await embedTexts(batch.map(e=>String(e.summary||"").slice(0,400)));
+      if(!vectors) break;
+      for(let j=0;j<batch.length;j++){
+        if(!vectors[j] || !vectors[j].length) continue;
+        batch[j].vector = vectors[j];
+        await tavernDbStore(db,"events","readwrite",os=>os.put(batch[j]));
+        done++;
+      }
+    }
+    return done;
+  }catch(e){ return 0; }
+}
+
+async function dbBackfillWorld(state){
+  if(!state || !state.ai || state.dbBackfilled) return;
+  const worldId = tavernWorldId(state);
+  state.dbBackfilled = true;
+  try{
+    const existing = await tavernDbRecentEvents(worldId, 1);
+    if(existing.length) return;
+    const memories = Array.isArray(state.memory) ? state.memory.slice(-40) : [];
+    for(let i=0;i<memories.length;i++){
+      const text = String(memories[i]||"").trim();
+      if(!text) continue;
+      await tavernDbPutEvent({
+        id:worldId+"::legacy::"+i, worldId, turn:0, minute:null, place:"",
+        summary:text.slice(0,600), participants:[], importance:tavernImportance(text),
+        status:tavernIsOpen(text)?"open":"closed", kind:"legacy", keywords:[], createdAt:Date.now()
+      });
+    }
+    const cons = Array.isArray(state.consequences) ? state.consequences.slice(-30) : [];
+    for(const c of cons){
+      const text = [c.decision,c.fact,c.followUp].filter(Boolean).join("；");
+      if(!text) continue;
+      await tavernDbPutEvent({
+        id:worldId+"::legacy-c::"+String(c.id||c.turn||tavernHash(text)), worldId,
+        turn:Number.isFinite(c.turn)?c.turn:0, minute:null, place:"",
+        summary:text.slice(0,600), participants:[], importance:tavernImportance(text),
+        status:c.status==="pending"?"open":"closed", kind:"legacy", keywords:[], createdAt:Date.now()
+      });
+    }
+    await tavernDbPutWorld({worldId,name:state.worldName||"",savedAt:Date.now(),turn:state.turn||0,backfilled:true});
+  }catch(e){}
+}

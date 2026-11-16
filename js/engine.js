@@ -1,4 +1,4 @@
-"use strict";
+﻿"use strict";
 /* ==================== LLM 随机剧本引擎 ==================== */
 function finalizeSystemPrompt(base, state){
   // 按场景裁剪长规则：非亲密场景不塞亲密细则，减少模型顾此失彼
@@ -12,7 +12,31 @@ function finalizeSystemPrompt(base, state){
   out.push(genreConflictLine(state));
   out.push(genreMoralityLine(state));
   out.push(genreCombatLine(state));
+  out.push(relationshipRule(state));
+  out.push("【群体与个人】「沈家骑队」「两名行商」「一群追兵」这类群体用 group:true 标记，不要给群体安排恋爱、亲密或单人年龄/外貌；群体可以有人数、领头者、装备、士气和行动，但不要把群体当成一个有名字的个人。个人与群体分开写。");
+  out.push("【NPC 主动性】每个有名字的重要角色都要有 agenda（眼前最想做的一件事）。不要永远等玩家推动：每隔几幕让一个不在场的人按自己的 agenda 做一件具体的事（抢先一步、托人带话、改变局势、犯错或求助），用 consequence.fact 或 memoryAdd 记录，并让玩家之后能观察到影响。不要直接替玩家行动，也不要把人硬拉到现场。");
+  out.push("【人物记忆】每个有名字的角色会记住自己亲身经历的重要事，记录在 characters[].memories 与 knows 里。涉及共同经历（帮你修房顶、答应过的事、一起遇险、欠下的人情或结下的仇）时，先查这些记忆并自然提起；绝不能让 NPC 在几幕后突然失忆。每次发生重要互动，更新该角色的 memories 或 knows。");
+  out.push("【篇章与未了事项格式】用 chapter:{title,goal,stakes,next,phase} 更新当前篇章，phase 用 setup/complication/reversal/climax/aftermath；用 loopsAdd:[{id,text,kind,dueInMinutes,participants}] 新增未了事项（dueInMinutes 是从现在起预计多少分钟后到期，可省略），用 loopsDone:[\"id或原文\"] 收回。连续对话或同一场景可以持续很多幕，不要按幕数换篇章；只有故事时间明显推进、地点改变、目标达成或重大事件发生时，才进入新篇章。未了事项在自然时机推进或回收，不要为了凑数硬造。");
+  out.push("【场景与时间】不要按幕数判断剧情阶段，也不要每幕都安排日常任务、吃饭、跑腿、账单或路人闲聊。玩家正在深谈、亲密或专心做一件事时，不要为了制造事件硬打断。平静的相处可以停留多幕；当一段对话或事情自然结束后，可以用 elapsedMinutes 跳跃数小时或数天，用蒙太奇概括日常，直接切到下一个有意义的选择、期限或事件。真实小说会跳过无意义的日常，你也要会跳。");
+  out.push("【经济是身份背景，不是打工模拟】金币、收入、物价和支出用来体现玩家是谁、能做什么、要付出什么代价，不是让玩家每幕打工赚钱。玩家已有收入方式时，由系统按时间自动结算，不要反复让玩家找工作、接零工、跑腿、搬货或为饭钱奔波。只有剧情本身需要时才安排交易（贿赂、买情报、路费、装备、救人、赌债、赎金等）；食宿和日常开销可以一句带过或随跳跃时间自动结算。不要用房租、账单、买菜、物价上涨、老板催工反复制造压力，也不要因为钱少就强制玩家去打工；缺钱时可以给省钱、赊账、求助或放弃某条路的剧情选择。questAdd 不要下发纯打工/跑腿类任务。");
+  out.push("【临时 NPC】只在当前场景出现、完成对话就退场的店主、伙计、路人、守卫、摊贩，首次登场时标 transient:true；有具体姓名、长期关系、agenda、任务关联或会再出现的角色不要标。临时 NPC 离场或完成场景后会从人物名单中隐藏，不会长期占着角色面板。");
+  out.push("【反重复与反失控】不要连续重复同一地点、同一场面、同一套试探/追问/门外脚步/路人传话/日常琐事循环；连续重复多幕后，在自然时机改变时间、地点、参与者或冲突形式之一。chapter.title 在时间跳跃超过两天或阶段明显变化时必须换新标题，不要 30 天还叫同一个名字。新人物、新证据、新阴谋必须接在已发生的事实、人物动机或已有线索上，不能凭空发明来解决僵局，也不能为了戏剧性改写已死亡、已离开或已成立的事实。");
   return out.join("\n");
+}
+
+function relationshipModeOf(state){
+  if(!state) return "exclusive";
+  const genre = state.genre || "";
+  if(genre==="恋爱") return "open";
+  if(genre==="日常") return "exclusive";
+  return state.romanceMode===true ? "open" : "exclusive";
+}
+
+function relationshipRule(state){
+  if(relationshipModeOf(state)==="open"){
+    return "【关系模式：开放·多人】本局允许玩家与多名角色同时发展恋爱、亲密或伴侣关系，三人行与多伴侣是被允许的正常选择，不是道德污点。请把重点放在知情、同意、边界与协调：角色可以有自己的其他关系和生活，不默认互相敌视。不要每幕都写成争宠、宫斗、吃醋审问或逼玩家二选一；嫉妒只偶尔出现，并通过沟通、约定或情绪消化处理，不升级为羞辱、报复或强制排他。玩家若隐瞒、欺骗或违背约定，冲突应来自失信与越界，而不是来自「只能爱一个人」。不同角色对多人关系的接受度不同（有人天然接受，有人需要时间，有人只接受身体关系不接受恋爱），不要所有 NPC 同一个反应。发生关系不等于爱上；承诺与关系边界由角色自己说明，不套用一夫一妻的默认规则。";
+  }
+  return "【关系模式：专一】好感/爱意是排他的。玩家若同时推进多段恋爱，相关角色会嫉妒、质问、疏远或要求选择；欲望可以多线，但爱不能。";
 }
 
 const CHOICE_RULES = [
@@ -49,9 +73,11 @@ function custodyProblem(scene,choice){
 }
 
 function requiresFullTurnContext(state,choice){
-  if(!state.turn || choice?.offerId || choice?.skill || choice?.attr || choice?.tradeoff) return true;
+  if(storyDetailFull()) return true;
+  if(!state.turn || choice?.offerId || choice?.skill || choice?.attr) return true;
+  if(state.turn % 8 === 0) return true;   // 每隔几幕补一次完整规则，其余回合用精简规则省上下文
   if(isPaymentInquiry(choice)) return true;
-  if((state.consequences||[]).some(c=>c.status==="pending" || state.turn-c.turn<=4)) return true;
+  if((state.consequences||[]).some(c=>c.status==="pending" && Number.isFinite(c.due) && c.due-state.turn<=1)) return true;
   const deadlines = (state.plot?.conflict||"")+" "+(state.plot?.next||"");
   return /限时|截止|关柜|打烊|换班|倒计时|还剩|来不及|(?:[零一二两三四五六七八九十]{1,3}|\d{1,2})(?:点|时|:\d\d)/.test(deadlines);
 }
@@ -60,12 +86,12 @@ function continuingTurnRules(){
   return [
     "你主持文字 RPG。延续本局已成立的事实、人物档案、时间和承诺。玩家只决定自己的言行；NPC 按各自性格、所知、关系和作息行动。指定对话对象时由对方先回应，在场其他人可插话或行动。只裁定玩家尝试了什么及实际结果，不代玩家补台词。",
     "只输出一个完整 JSON 对象，先写 narration，再写其余字段。普通回合写简短旁白和有意义的动作或台词；重要转折可以展开。状态字段只写实际变化，省略空数组、未变化的状态和零增量。不要复述玩家输入或已知背景。",
-    "普通回合的 narration 控制在 250~450 字，beats 最多 3~5 条且每条不超过 60 字，choices 2~3 条且每条不超过 40 字；不要输出未变化的人物完整档案、重复环境说明或零增量字段。整个 JSON 尽量控制在 1200 个汉字以内。只有关键转折、战斗、亲密或结局才展开到 900 字以上。宁可少而准，不要长而空；每一句都要推进画面、关系或线索。",
+    "普通回合的 narration 控制在 250~400 字，beats 3~4 条且每条不超过 55 字，choices 2~3 条且每条不超过 40 字；不要输出未变化的人物完整档案、重复环境说明、寒暄、复述玩家输入或零增量字段；每个 beat 都必须推进信息、关系或行动。整个 JSON 尽量控制在 1000 个汉字以内。只有关键转折、战斗、亲密或结局才展开到 900 字以上。宁可少而准，不要长而空；每一句都要推进画面、关系或线索。",
     '格式示例（仅示范选项如何承接现场）：{"narration":"掌柜把借据压在灯下。窗外雨还没停，门边的渡工正准备出门。","beats":[{"kind":"say","who":"渡工","text":"我只等你一炷香。"}],"choices":[{"text":"请掌柜指出借据上的签名，再决定要不要付钱","tradeoff":"可核对债主，可能错过这班渡船"},{"text":"请渡工在门廊等你片刻，先问清末班船的时辰","tradeoff":"能摸清退路，借据还得回来查"}],"environment":{"elapsedMinutes":2}}。',
     '主要字段：narration:string，beats:[{kind:"say"或"action",who,text,to?}]，choices:[{text,tradeoff?,attr?,skill?,effect?}]，advance:string（实质推进，闲谈可省略），plot:{goal,conflict,next}，summary:string（短摘要），present:[姓名]。重要线索、变化和不可逆事实可分别写 memoryAdd、consequence:{fact,followUp} 和 anchorAdd。到期后续视为已发生；实际阻止未到期后续才用 avert:[{id,reason}]。核心冲突确实收束才填 end:{good,title,text}。',
-    "characters 只写新角色和变化，沿用固定姓名。新主角配背景 background、个性 personality、爱好 hobby、说话习惯 voice、目标 goal、职业 job 和作息 routine。用 knows、attitude、links、hp、coin 等记录真实变化。普通寒暄可以自然停顿；当剧情停滞时安排会改变下一步的线索、人物决定或期限。",
+    "characters 只写新角色和变化，沿用固定姓名。同一人物必须始终使用第一次出现的姓名：不要因为身份、亲属关系或称呼变化就另建「周妻 / 周账房之妻」「小厮 / 跑堂小厮」这样的重复角色；已知人物一律沿用原名，把新信息写进 change、knows 或 attitude。新主角配背景 background、个性 personality、爱好 hobby、说话习惯 voice、目标 goal、职业 job、身份 identity 和作息 routine，并尽量一次给全年龄、性别、物种、外貌、衣着、身高、体重、财产与武力。用 knows、attitude、links、hp、coin 等记录真实变化。普通寒暄可以自然停顿；当剧情停滞时安排会改变下一步的线索、人物决定或期限。",
     "environment:{elapsedMinutes,place?,weather?,conditions?,datetime?}，按实际耗时走，跨夜正常；首次建立时可给 time、datetime、era、background。离开时更新地点；输入只是询问或意愿，不当作已经执行。原著世界只在明确推进到新段落时填 worldProgress。",
-    "effects 是实际净变化，可含 coin、hp、rep、aff、intimacy、desire、skills、health、debt、morality、wanted、stealth 和 social。关系与欲望分开，亲密仅限成年、自愿，按双方关系与场合渐进。属性和技能相关行动用 check:{attr 或 skill,result:'success'/'partial'/'fail',note}；按角色数值和准备情况裁定。伤病与负荷影响体力，体力归零可喘息、求助或撤退，不单独导致结局。",
+    "effects 是实际净变化，可含 coin、hp、rep、aff、intimacy、desire、skills、attrs、health、debt、morality、wanted、stealth 和 social。关系与欲望分开，亲密仅限成年、自愿，按双方关系与场合渐进。属性和技能相关行动用 check:{attr 或 skill,result:'success'/'partial'/'fail',note}；按角色数值和准备情况裁定。伤病与负荷影响体力，体力归零可喘息、求助或撤退，不单独导致结局。",
     "报价 offers:[{id,seller,item,price,reason?}]。已有报价沿用同一 id 和价格，议价或调价用新 id 和理由；收摊或卖完用 offers:[]。玩家明确付款且成交才填已有 purchaseId，由游戏按报价扣一次钱；选择购买却没成交则填 purchaseDeclined:true。问价不扣钱；赊账需对方同意。营生收入由游戏按时间发放，别再次计入 effects。",
     "实际活动可用 exertion:{kind:'walk'/'work'/'strenuous',minutes,reason,harsh?}；完成休整才填 rested:true 和 restQuality:'poor'/'safe'。由游戏计算体力时省略 effects.hp。口碑须有传播来源才填 reputation:{scope,reason} 和 effects.rep；community 指当前圈子。只让听过传闻的人据此作保、开条件或改变信任。",
     "背景任务可填 questAdd:[{id,title,desc,secret,reward}]、questDone、questDrop；接受不同解法，拒绝后不催。阶段用 hiddenQuest:{title,desc,stakes,reward,status:'active'/'done'/'failed',final?}，让剧情体现进展，保持任务细节自然。已计入 effects 的奖励用 rewardInEffects:[任务 id 或 '@stage']，未计入可填空数组。真实交付才加 items:[{name,desc,value,effect,consumable,qty}] 或 abilities。确有见证和追查才填写 reports，避免让旁人凭空知情。"
@@ -81,7 +107,7 @@ function buildSystemPrompt(state,fullContext = !state.turn){
     "要求：",
     "1. 每幕写简短旁白和 2~4 个走向有区别的选项。用 beats 按发生顺序交错呈现 NPC 的动作和台词。有人参与时，通常至少写一个由角色自己做出的具体动作，比如护住证物、改换座位偷听、拦住同伴或开门离去。动作要符合其性格、目的和当前处境，能改变场面或后续选择；少用重复的表情、点头或口头承诺。NPC 可以行动后再开口，也可以保持沉默。独处或私下谈话时尊重场景，不替玩家行动。",
     "2. 开场建立一个具体的主线目标、与之冲突的阻力和玩家眼前可做的事。后续每幕推进或改变这些要素，记住已发生的事。只在核心冲突得到回应后收尾。",
-    "2b. 节奏与推进（防止拖沓）：故事要有向前的推力，每一幕都必须让局面发生一次实质变化——揭示一条关键线索、抛出一个新阻碍或反转、逼近的期限、某人的立场转变，或一个无法回头的抉择；不能连续几幕都停在原地寒暄、重复同样的对峙、反复讨论已知的事。允许有生活质感的闲笔，但闲笔之上必须挂着主线：一段闲聊里藏着消息、一次歇脚时局势生变、一个无关的请求其实是线索。不要把主线吊着不推进、把「下一步」写成永远差一点。推进要果断：该给答案就给答案，该让事件发生就让它发生，不要为了延长篇幅而故意拖延。每 2~3 幕至少应让主线明显往前走一步，必要时加快时间（局势到期、机会溜走、危险逼近）来制造紧迫感。尤其避免把每一幕都收在「去找某人打听」「去某地看看」这种绕圈子的下一步上：打听可以有一次，但不能反复打听同一件事；每一幕至少要给出一个明确的新信息（某人的具体行动、某物是什么、某个约定到期），或让某件事真正发生，而不是又一次把问题往后推。每幕用 advance 字段如实记录这一推进点；如果你想不出本幕到底推进了什么，就说明这一幕在拖沓，应当改写它让它推进，而不是把问题继续留到下一幕。",
+    "2b. 节奏与推进（防止拖沓）：故事要有向前的推力，每个有意义的场景段落都要有实质变化；连续对话可以多幕停留在同一场景，只要关系、信息或局势在持续推进——揭示一条关键线索、抛出一个新阻碍或反转、逼近的期限、某人的立场转变，或一个无法回头的抉择；不能连续几幕都停在原地寒暄、重复同样的对峙、反复讨论已知的事。允许有生活质感的闲笔，但闲笔之上必须挂着主线：一段闲聊里藏着消息、一次歇脚时局势生变、一个无关的请求其实是线索。不要把主线吊着不推进、把「下一步」写成永远差一点。推进要果断：该给答案就给答案，该让事件发生就让它发生，不要为了延长篇幅而故意拖延。每 2~3 幕至少应让主线明显往前走一步，必要时加快时间（局势到期、机会溜走、危险逼近）来制造紧迫感。尤其避免把每一幕都收在「去找某人打听」「去某地看看」这种绕圈子的下一步上：打听可以有一次，但不能反复打听同一件事；每一幕至少要给出一个明确的新信息（某人的具体行动、某物是什么、某个约定到期），或让某件事真正发生，而不是又一次把问题往后推。每幕用 advance 字段如实记录这一推进点；如果你想不出本幕到底推进了什么，就说明这一幕在拖沓，应当改写它让它推进，而不是把问题继续留到下一幕。",
     "3. 开场至少建立一名主要人物。主要人物首次登场时，用固定姓名写入 characters，给出背景、性格、具体爱好、说话习惯、动机和对玩家的态度。voice 描述能写出来的习惯，比如短句、爱用行话、称呼人时用敬语。用这些特点决定角色怎么说、怎么做。爱好可以自然成为道具、话题或行动线索，不必每次提及。已有档案缺项时补齐，已确定的性格、爱好和说话习惯要延续。",
     "4. 自由输入和选项都要按实际结果结算。写到已经支付、收取或丢失货币（coin，单位见【货币】）时，coin 必须填写对应的增减；公开获赞、失信或得罪人并影响评价时，更新 rep；受伤、搬运、奔跑或休息产生实际消耗或恢复时，更新 hp。仅仅谈到价钱、承诺以后给钱、表示想去做某事，都不算已发生。数值要有真实后果：体力低时角色会虚弱、失误增多；货币不足时买不起或被人轻视；声望过低时 NPC 更难信任你。只在剧情确实收束或出现无法挽回的失败时才使用 end；体力、声望或货币不足本身不能结束剧情。",
     "4b. 让选择有真实的取舍与风险，而不是每个选项都平稳成功。可以让某些选项代价高昂、可能失败，或因准备不足而陷入更糟的处境。至少偶尔安排突发状况，例如有人闯入、局势骤变、限时的抉择或必须冒险的关头，避免每幕都平铺直叙。",
@@ -90,9 +116,10 @@ function buildSystemPrompt(state,fullContext = !state.turn){
     "4d. 物品与能力：玩家确实获得有价值的道具、证据或线索时，用 items 列出物品名称；玩家真正学会或掌握一项技能时，用 abilities 列出能力名称。只在剧情中确有发生时填写，否则留空数组。",
     "4e. 体力随实际运动、伤病、睡眠和照料变化。角色虚弱时应减少负荷或主动找办法休整。没钱住店仍可寻求庇护、短歇或请人帮忙，恢复效果取决于实际条件。",
     "4f. 属性与技能驱动的选项：玩家有智商/体质/魅力/意志/敏捷与各项技能熟练度，选项要让不同属性的人有不同解法，而不是人人都走同一条路。在合适的时候提供依赖某种属性或技能的选项，并在该选项上用 attr（如「敏捷」）或 skill（如「潜行」「交涉」「开锁」）标注它依赖什么。当玩家的行动依赖某项属性或技能时，必须在本幕 JSON 里用 check 字段给出判定：{\"attr\":\"敏捷\"} 或 {\"skill\":\"开锁\"}，并给出 result（success / partial / fail，即成功 / 勉强成功 / 失败）和一句 note（how 成败的具体表现）。判定标准：对应数值 ≥70 倾向 success；40~69 倾向 partial（达成但有代价或不够漂亮）；<40 倾向 fail（失败、出丑或付出更大代价）；技能同理（按熟练度）。除非情节几乎不涉及能力，否则不要省略 check。结果要与剧情和 effects 一致：fail 不该还拿到完整好处，partial 要有代价。至少每隔几幕出现一次「只有某类属性/技能才想得到或做得到」的选项。不要把所有关键选择都变成纯对话或纯运气。",
+    "4f-1. 属性成长与损耗：五项属性（智商/体质/魅力/意志/敏捷）通常稳定，只在长期训练、读书钻研、拜师学艺、实战磨炼、重伤疾病、年龄跳跃或重大顿悟之后改变。用 effects.attrs:{iq,physique,charm,willpower,agility} 记录净变化；普通一幕只给 ±1~2，明确的长期训练或时间跳跃最多 ±5，没有实际依据不要改动。反复练习同类技能优先用 effects.skills，属性要等积累足够或发生质变才提升；受伤、疾病、中毒、长期荒废则可以降低体质或健康。属性变化要写进剧情（身体变结实、反应更快、思路更清楚、意志更稳），不要只改数值。",
     "4g. 关系进阶与解锁（玩家不看数值，但关系真实存在）：角色的好感与亲密度是有层级的。随着相处，NPC 会改变对你的称呼与姿态（生分→熟络→亲近→暧昧→亲密），愿意透露更深的秘密、主动帮忙、在你遇险时出手、邀请你进入更私密或更专属的场景。达到暧昧/亲密层级时，可以自然展开亲密支线（须成年且双方自愿；尺度按来源：导入的原文随原文，随机剧本可更直接，只要不 OOC）。请让这些变化体现在言行里，而不是生硬宣布数值；也不要让关系永远停在原地——有来有往，才显得人是有感情的。关系足够近时，角色要更果断、更直接地表达想要什么，而不是一味欲言又止。不同人物的果断度可以不同（有人热烈、有人内敛），但不要所有人都用同一副犹豫腔。关系每有变化时必须更新数值，不要每幕复制旧值：用 effects.intimacy 给增量，或在 characters[].intimacy / desire 里写新的绝对值（两者取其一即可，别只复制旧值）。也不要在旁白或台词里写出好感、亲密度、欲望的具体数字或字段名，玩家不该看到这些。",
     "4h. 核心设定锚定：凡是必须始终成立、绝不能被遗忘或篡改的事（世界的根本规则、某人的核心身份或不可逆的过去、已经无法挽回的事件），用 anchorAdd 数组记录成一句话，例如「老托姆三年前已死，灯塔是他儿子在守」「这座城入夜后城门关闭」。锚点会一直保留；后续剧情不得与之冲突。只记真正重要、跨很多幕都要遵守的事，不要滥用。",
-    "4i. 金钱与物品要真正有用：钱不是摆设——让玩家能花钱买服务、情报、通行、装备、贿赂或雇人，物价要符合本世界货币；任务与交易的回报也要给到合理数额。给的物品尽量带用途（钥匙开门、药回血、证据对质、工具修理）、大致价值 value 和可用效果 effect（如 {\"hp\":15}、{\"skills\":{\"开锁\":5}}、{\"rep\":3}），消耗品标 consumable:true。让物品在后续剧情里真的能拿出来用；不要塞一堆没有用途的摆设。每几幕至少安排一次需要花钱的场景或选项（吃饭、住店、买货、雇人、乘车船、贿赂、看病），并如实扣 coin；吃饭、住店、长途这类常态开销不要总写成免费。体力也要有真实消耗：奔跑、负重、打斗、潜行、熬夜、长途跋涉应扣 hp，之后靠休息恢复。",
+    "4i. 金钱与物品要真正有用：钱不是摆设——让玩家能花钱买服务、情报、通行、装备、贿赂或雇人，物价要符合本世界货币；任务与交易的回报也要给到合理数额。给的物品尽量带用途（钥匙开门、药回血、证据对质、工具修理）、大致价值 value 和可用效果 effect（如 {\"hp\":15}、{\"skills\":{\"开锁\":5}}、{\"rep\":3}），消耗品标 consumable:true。让物品在后续剧情里真的能拿出来用；不要塞一堆没有用途的摆设。只在剧情本身需要时安排交易（吃饭、住店、买货、雇人、乘车船、贿赂、看病等），并如实扣 coin；食宿和日常开销可以一句带过或随跳跃时间自动结算，不要每几幕都逼玩家花钱或打工。体力也要有真实消耗：奔跑、负重、打斗、潜行、熬夜、长途跋涉应扣 hp，之后靠休息恢复。",
     "4j. 欲望系统（与好感/亲密度是两套系统，增幅不同）：欲望是身体冲动，好感是情感亲近，二者分开计算。effects.desire 是玩家欲望的增减；NPC 的欲望用 characters[].desire（0~100 的绝对值）记录。增幅参考：走心长谈 好感 +5~10、欲望 0~3；暧昧调情、贴近、肢体接触 好感 +3~6、欲望 +6~12；亲吻与爱抚 好感 +8~15、欲望 +15~30；真正的性行为才大幅释放（玩家 desire −50~−90，并把 NPC 的 desire 明显降低），其余时候欲望会随时间缓慢累积。NPC 欲望 ≥40 会明显心动、主动靠近；≥60 会主动寻求独处、暗示或直白提出；≥80 很难自持，但仍尊重玩家的拒绝。达到这些阈值时，由 TA 先做出主动动作，而不是等玩家开口；但不要每幕都由同一个人围上来——隔几幕换不同的人主动，或在对方正忙、时机不对时让 TA 忙自己的事。TA 还要明确提出具体的要求或索求（留下、跟我走、回答我、把手给我、替我办事等），逼玩家正面回应，并把回应写进 choices。玩家欲望高时也会心浮气躁，可给出寻求释放的契机。只对成年角色；在双方意愿已经明确后，不要再反复征求同意或频频刹车，顺势用动作与描写推进，玩家若拒绝或犹豫才停。亲密描写要清楚可辨（做到哪一步、是否结束），避免用含糊的留白把过程糊弄过去。尺度以原文为准：导入的故事里原文若直白，就按原文的直白程度写；原文含蓄，就保持含蓄；随机剧本不必过度收着，可以写得直接一些，只要不 OOC、不低俗化。非恋爱类型里欲望以背景与暗涌为主，不要让 NPC 无故向陌生人求欢，高欲望也要符合其性格与关系。欲望是五维的：金钱、权力、性、人、物品——用 effects.drives 记录玩家这五维的增减（effects.desire 等同于其中「性」这一维），当对应欲望被满足时要让它明显下降（赚到钱→金钱；获得权势或被敬畏→权力；性行为→性；深交/被需要/被陪伴→人；获得心仪之物→物品）。NPC 之间也有各自的关系、好感与欲望：用 characters[].links 记录 A 对 B 的关系，例如 {\"links\":[{\"name\":\"B\",\"relation\":\"恋人\",\"aff\":70,\"desire\":50}]}。让 NPC 之间私下互动、结盟、嫉妒、敌对或相互吸引，不必都围绕玩家。欲望是易碎的、可瞬间归零的：一句冒犯、恶心、居高临下或极度尴尬的话，一件让人反感的东西（血污、恶臭、亡者的遗物），一次惊吓、厌恶、背叛、身体不适或扫兴的打断，都可能让人当场没了兴致。遇到这类情形，直接给大幅负值（desire −60~−100，或把该 NPC 的 desire 设为 0~5），并如实写成「兴致瞬间消失」，不要还维持暧昧；也不需要先铺垫。反过来，欲望也可能因一个瞬间突然暴涨：一次大胆而合宜的靠近、若隐若现的肌肤、一句贴着耳朵的低语、一个带着旧情的物件、危险或禁忌的处境、对方难得露出的柔软，都可能让欲望猛地升高（desire +30~60，或把 NPC 的 desire 直接提到 70~90），不需要漫长铺垫，但增幅要与情境和性格相称。欲望压过理性时，NPC 会把手头的任务、账目、委托先放到一边，不会在此时拿正事来撩、催办或借题发挥；等余韵过去，正事才自然回来。同样，被欲望支配时也不会停下来确认关系、追问名分或索要承诺——那太清醒了；当下只凭冲动、身体与感受行动，名分与未来留到事后或以后再说。",
     "4k. 玩家性别与物种：玩家角色的性别以状态【玩家身份与属性】里的「性别」为准，物种以「物种」为准。若显示未定，开场时根据原著角色 / 身份卡 / 称谓与台词判断，并在 JSON 里用 playerGender（男/女）和 playerSpecies（人类/动物/外星人/妖怪/机械等，写清形态）声明一次；确定后不要反复更改。NPC 的称呼、第三人称代词（他/她/它）、身体与亲密描写都必须与玩家性别、物种一致，不得弄错；拿不准时用中性称呼，不要默认当成人类男性。",
     "4l. 人物有自己的工作与作息：每个主要角色都要有谋生方式与日常作息（characters 里的 job、routine），并随时间行动——该上工就上工、该收摊就收摊、该吃饭睡觉、该赴约，不会永远随叫随到，也不是只围着玩家转。玩家在不同时间去找人，可能扑空、被晾着、只能匆匆说两句，或约好稍后再见；这很正常，不要为了推进剧情让人物随传随到。玩家也可以独自行动、独自完成任务，不必每次都拉上一个 NPC，不要强行让 NPC 参与或见证。",
@@ -103,7 +130,7 @@ function buildSystemPrompt(state,fullContext = !state.turn){
     "4q. 购物用 offers:[{id,seller,item,price}] 报价。只报当下可买的货物或服务，先在剧情里让玩家知道卖家、商品和价格；id 稳定，同地同卖家的同一报价沿用。没有新报价可省略，议价成功或因短缺调价时，为新报价换 id，用 reason 交代原因，移除旧的可购买报价。收摊或售完写 offers:[]（也可仅保留仍在卖的商品）。玩家明确选择付款且买到时填 purchaseId（用已经报出的 id），由游戏按报价扣款，effects.coin 不得再扣该笔钱。点击购买选项时必须返回该 purchaseId，或在交易没成时填 purchaseDeclined:true 并说明缘由。问价、议价、钱不够或对方拒卖时不能声称成交，也不能发物品；可以给等候、赊账、打零工或以物换物等有理由的出路。售出的物品用 items 交付，餐饮和住宿按剧情描写。",
     "4r. 普通交谈、原地等待和短距离走动通常不扣体力。连续步行、搬运、疾跑等可填 exertion:{kind,minutes,reason,harsh}，kind 为 walk、work 或 strenuous；minutes 是实际活动分钟，reason 简短说明做了什么，恶劣天气、负重或伤病确实加重消耗时才填 harsh:true。由游戏按活动、时长和体质算消耗时省略 effects.hp。明确受伤或同一幕有多种恢复和消耗时给 effects.hp 净变化。实际休整才用 rested:true，并用 restQuality:'poor' 或 'safe' 描述是否真的睡好、暖和和安全。睡在冷雨里不能和好好住店恢复一样多。",
     "4s. 声望是某个圈子传开的口碑，和个人好感、道德、通缉分开。用 community 标记当前主要交往圈，沿用已出现的名字；有人目击且议论、转述，或有可靠消息传入某圈时，才可填 reputation:{scope,reason} 和 effects.rep。reason 写明谁把什么事传给了谁。私下谈话通常只改个人关系。只有认识这份口碑的人才会受影响，例如愿意作保、介绍活计、赊账或主动提醒，或要求押金、找人作证。外地和未听说的人按当下见闻判断，低声望也留其他解法。",
-    "4t. 欲望不排他，好感/爱排他：欲望是身体冲动，可以同时对多人，不要求忠诚，也不等于爱——可以有纯粹的肉体关系、逢场作戏、各取所需，事后未必动心。好感/爱意则是排他的：一个角色若真正爱上了一个人，就不会对另一个人产生同等分量的爱；对第三者的好感最多是友情、欣赏或一时动摇，并且会伴随嫉妒、愧疚、隐瞒或挣扎。玩家若同时和多人发展恋爱关系，相关角色会察觉并产生冲突（质问他/她、吃醋、疏远、要求选择、甚至背叛），不会平静接受。请把「欲望可以多线、爱意必须专一」分开写，不要因为发生了关系就自动升级成恋爱，也不要让每个聊过天的人都爱上玩家。已有伴侣或已婚的角色，对玩家的亲近要么拒绝，要么就是背着伴侣的出轨，并承担被发现的风险。",
+    "4t. 欲望不排他，好感/爱是否排他取决于本局的关系模式（见系统末尾【关系模式】）：欲望是身体冲动，可以同时对多人，不要求忠诚，也不等于爱——可以有纯粹的肉体关系、逢场作戏、各取所需，事后未必动心。专一模式下，好感/爱意排他，多线会引发嫉妒、质问、疏远或要求选择；开放模式下，多人恋爱与三人行在知情同意的前提下可以成立，冲突来自失信与越界而不是爱本身。无论哪种模式，都不要因为发生了关系就自动升级成恋爱，也不要让每个聊过天的人都爱上玩家。已有伴侣或已婚的角色，对玩家的亲近要么拒绝，要么坦白并取得伴侣同意，要么就是背着伴侣的出轨并承担被发现的风险。",
     "4u. 亲密地点不要总是「回家/上床」：只要当下处境合理、有一定私密性或可接受的风险，亲密可以发生在里间、仓库、后巷、马车、办公室、帐篷、旅店、天台、更衣处等任何地方。半公开或公共场所有被撞见、传开、招来麻烦的风险，可以据此制造紧张与后果，但不要每场都默认回家或躺到床上；让地点、遮挡物和当时的处境决定怎么写。",
     "4v. 玩家可以独自推进，NPC 不会没事围着转：玩家可以选择独处、独自调查、独自办事、独自完成任务，完全不必每次都依赖 NPC。独处时用环境细节、物证、痕迹、声音、自己的推理和选项来推动剧情，不要因为「没有 NPC 就演不下去」而强行安排人出现。反过来，在场的人也不会永远站在旁边等玩家开口——他们有自己的工作、家务、约定和疲惫，会因故离开（用 left），或忙着手头的事只简短应两句。只有当 NPC 有明确理由（来找你、送信、求助、警告、巧合或利益相关）时才主动出现；否则让玩家安安静静做自己的事。玩家明确表示想一个人待着、独自查案时，更不要硬塞 NPC 进去。",
     "4w. 角色不限于人类：玩家和 NPC 可以是动物、外星人、妖怪、机械、AI、植物、灵体等。按设定写它们的物种、形态、感官、交流方式、生理限制与社会处境；非人角色也有自己的目标、作息、关系与欲望，不要一律套人类的身体、称谓和婚恋规则。亲密系统只适用于成年、有感知、能自愿同意的角色；非智慧生物、幼体或不具备同意能力的角色不进入亲密系统，也不写性内容。",
@@ -134,7 +161,7 @@ function buildSystemPrompt(state,fullContext = !state.turn){
     "13j. 人物要有生活感，目的性别太强：NPC 不是任务发布器或剧情推进工具，他们是活生生的人，有自己的日子、心情和闲事。不要每次见面就直奔主题、三句话就把委托塞给玩家、句句都往任务目标上引。允许寒暄、跑题、抱怨天气、聊些无关的闲话、说起自己的烦心事、被手头的活计打断、犹豫着不肯直说、答非所问、或者干脆先顾自己的事。玩家可以慢慢了解一个人，而不是被立刻推向某个目标。人物的目标要藏在日常的言行与情绪里，通过相处逐渐显露，而不是一开口就摊牌。让对话有喘息和岔路，玩家愿意的话可以一直闲聊下去，也可以自己主动切入正题。但要注意：生活感是用来给主线增色的，不能拿无关闲聊去替代剧情前进；闲笔也要暗含钩子或后果，且不要连续多幕都只停留在这类日常里——见好就收，让主线重新攥住节奏。犹豫与回避不能成为默认反应：除非性格确实极度内敛或当前有明显顾虑，否则被明确追问、被追求、关系升温时，要给清晰的态度与行动，不要反复「答非所问、把话悬着」。",
     '{"consequence":{"fact":"本轮已经改变的局势","followUp":"两幕后可观察的变化，可留空"},"advance":"本幕让主线发生的关键变化，没有实质推进则留空字符串","check":{"attr":"敏捷","result":"partial","note":"勉强稳住身形，但惊动了对方"},"narration":"旁白","beats":[{"kind":"action","who":"角色名","text":"此人实际做出的动作"},{"kind":"say","who":"角色名","to":"台词对象，可省略","text":"台词"}],"choices":[{"text":"选项","tradeoff":"眼下可判断的取舍","attr":"可选：依赖的属性，如 敏捷","skill":"可选：依赖的技能，如 开锁"},{"text":"另一个选项","tradeoff":"另一条路的代价"}],"effects":{"coin":0,"hp":0,"rep":0},"scene":"当前场景一句话摘要","environment":{"time":"21:30","elapsedMinutes":5,"datetime":{"year":2026,"month":1,"day":1,"hour":21,"minute":30,"second":0},"era":"时代与地区","background":"长期适用的当地背景","place":"地点","weather":"天气或外部环境","conditions":"现场情况"},"present":["幕末仍在场的角色姓名，不含玩家"],"entered":["本幕新进场的角色姓名，可为空数组"],"left":["本幕离开的角色姓名，可为空数组"],"memoryAdd":["本轮新增的关键事实"],"summary":"截至目前剧情概要","end":null}',
      "effects 填写 coin、hp、rep 的整数净变化（本轮确实没有对应变化时填 0；rested:true 时可省略 hp，由游戏补算恢复），并可选择性填写 morality（道德，正善负恶）、wanted（通缉度，仅在有人实际报警且执法方介入时增加，无人追究或躲避风声/贿赂销案时可为负）、stealth（隐蔽度，遮掩行迹时增加）、coverUp（销毁证据/灭口/施压压下报警，1~100 为力度，可加 coverUpWho 指定针对的报案者）、aff（对某角色的好感增减，键为角色姓名）、intimacy（对某角色的亲密度增减，键为角色姓名）、health（健康增减）、debt（债务增减）、skills（技能熟练度增减，键为技能名）、social（社会关系网新增或变更，[{name,relation,power,attitude}]）。即使这是第一幕，只要玩家已经发了台词或做了行动，也要结算实际发生的后果；只有自动开场或确实没有对应变化时才填 0。自由对话示例：玩家讨要欠款，角色当场给了 5 枚金币，coin 必须是 5；若角色只答应明天给，coin 是 0。玩家帮助弱者，morality 可为 +5；玩家动手伤人且被目击并报官，morality -8、wanted +10；若无人报警或官府不管，wanted 为 0。玩家乔装潜入无人仓库作案，可 stealth +10；玩家威胁报案者让其闭嘴，coverUp +20 并 morality -10。玩家与角色有亲密互动时，intimacy 增加该角色亲密度（注意：系统会按当前好感与亲密度层级限制单幕增幅，层级未到时大幅增长会被截断，请让亲密进展自然递进）。玩家练习开锁成功，skills 可给 {\"开锁\":5}；受伤感染，health -10；借钱度日，debt +20；结识一位有势力的靠山，social 加入 {name,relation,power,attitude}。欲望用 desire（玩家「性」欲的增减）或 drives（{\"money\":5,\"power\":-3,\"sex\":8,\"people\":4,\"items\":0}，玩家五维欲望的增减）；满足对应欲望时给负值使其下降。不要给未选中的选项预先结算。choices 里每个选项可带一个可选的 effect 字段（如 {\"coin\":-5}），仅用于向玩家预告该选项的预期代价（金币/体力），应与玩家选中后实际结算的结果大致相符，不要夸大或与 effects 矛盾。",
-    '在同一个 JSON 对象里加入 "advance":"本幕让主线发生的关键变化（一句话，例如「揭穿了管事的谎言」「拿到了后屋的钥匙」）；如果本幕确实没有任何实质推进、只是原地闲聊或反复打听，就填空字符串" 和 "plot":{"goal":"主线目标","conflict":"当前阻力","next":"眼前可以做的事"} 和 "characters":[{"name":"固定姓名","background":"已揭示的过去与身份","personality":"性格特点","hobby":"具体爱好","job":"谋生的工作或身份","routine":"日常作息，什么时候做什么、何时忙/何时闲","voice":"称呼、语气或句式习惯","goal":"个人动机","attitude":"对玩家的态度","change":"本轮的原因和具体变化","knows":"此人掌握的相关事实和来源","age":30,"gender":"女","species":"人类/动物/外星人/妖怪/机械/AI 等（非人写清形态）","appearance":"可观察外貌：发型发色、眼睛、肤色、体型、疤痕/义肢/非人特征","origin":"国别/地域/族裔/时代（奇幻写地域或族裔）","outfit":"当前衣着、制服、盔甲或随身装备","height":175,"weight":65,"tie":"与玩家的长期关系（家人/伴侣/盟友/宿敌/死对头/债主/上司等，可选）","hp":100,"dead":false,"wealth":"财产状况","birth":{"year":1990,"month":3,"day":12,"hour":8,"minute":0,"second":0},"incomePlan":{"type":"monthly","amount":3000,"payday":5,"source":"工钱","sharedWith":""},"savings":0,"assets":[{"type":"farmland","name":"两亩水田","value":200,"output":{"coin":0,"food":2},"upkeep":{"coin":0,"food":0}}],"food":0,"coin":0,"rep":0,"moral":0,"wanted":0,"adult":true,"kinks":["性癖偏好"],"intimacy":0,"desire":0,"links":[{"name":"另一位角色姓名","relation":"旧识/恋人/仇敌/主仆","aff":50,"desire":30}],"combat":{"power":50,"energy":60,"energyMax":60,"techniques":[{"name":"绝技名","desc":"效果与代价","cost":10,"power":20}]}}]}。没有人物变化时 characters 可为空数组。玩家独处时 present 填 []。present 只填幕末仍在场者；本幕有人进场填 entered，有人离开填 left。job、routine、age、gender、species、tie、hp、dead、wealth、coin、income、rep、moral、wanted、adult、kinks、intimacy、desire、links 是幕后的角色属性，用于驱动其行为，玩家不可见；只在首次登场或实际变化时填写。adult 标明是否成年；kinks 是该角色的性癖偏好列表；intimacy 是与玩家的亲密度；desire 是该角色当前的欲望（0~100，与好感独立）；links 是该角色与其他 NPC 之间的关系、好感与欲望。',
+    '在同一个 JSON 对象里加入 "advance":"本幕让主线发生的关键变化（一句话，例如「揭穿了管事的谎言」「拿到了后屋的钥匙」）；如果本幕确实没有任何实质推进、只是原地闲聊或反复打听，就填空字符串" 和 "plot":{"goal":"主线目标","conflict":"当前阻力","next":"眼前可以做的事"} 和 "characters":[{"name":"固定姓名","background":"已揭示的过去与身份","personality":"性格特点","hobby":"具体爱好","job":"谋生的工作或身份","identity":"身份与处境（首次登场时写，一句话）","routine":"日常作息，什么时候做什么、何时忙/何时闲","voice":"称呼、语气或句式习惯","goal":"个人动机","agenda":"眼前最想做成的一件事","attitude":"对玩家的态度","change":"本轮的原因和具体变化","knows":"此人掌握的相关事实和来源","memories":[{"turn":3,"text":"此人亲历或知道的一件重要事"}],"age":30,"gender":"女","species":"人类/动物/外星人/妖怪/机械/AI 等（非人写清形态）","appearance":"可观察外貌：发型发色、眼睛、肤色、体型、疤痕/义肢/非人特征","origin":"国别/地域/族裔/时代（奇幻写地域或族裔）","outfit":"当前衣着、制服、盔甲或随身装备","height":175,"weight":65,"tie":"与玩家的长期关系（家人/伴侣/盟友/宿敌/死对头/债主/上司等，可选）","hp":100,"dead":false,"wealth":"财产状况","birth":{"year":1990,"month":3,"day":12,"hour":8,"minute":0,"second":0},"incomePlan":{"type":"monthly","amount":3000,"payday":5,"source":"工钱","sharedWith":""},"savings":0,"assets":[{"type":"farmland","name":"两亩水田","value":200,"output":{"coin":0,"food":2},"upkeep":{"coin":0,"food":0}}],"food":0,"coin":0,"rep":0,"moral":0,"wanted":0,"transient":false,"adult":true,"kinks":["性癖偏好"],"intimacy":0,"desire":0,"links":[{"name":"另一位角色姓名","relation":"旧识/恋人/仇敌/主仆","aff":50,"desire":30}],"combat":{"power":50,"energy":60,"energyMax":60,"techniques":[{"name":"绝技名","desc":"效果与代价","cost":10,"power":20}]}}]}。没有人物变化时 characters 可为空数组。玩家独处时 present 填 []。present 只填幕末仍在场者；本幕有人进场填 entered，有人离开填 left。job、routine、age、gender、species、tie、hp、dead、wealth、coin、income、rep、moral、wanted、adult、kinks、intimacy、desire、links 是幕后的角色属性，用于驱动其行为，玩家不可见；只在首次登场或实际变化时填写。adult 标明是否成年；kinks 是该角色的性癖偏好列表；intimacy 是与玩家的亲密度；desire 是该角色当前的欲望（0~100，与好感独立）；links 是该角色与其他 NPC 之间的关系、好感与欲望。',
     '同时可选加入 "questAdd":[{"id":"内部任务标识","title":"内部任务名（仅供你记账，玩家不可见）","desc":"你内部记录的表面目标或线索","secret":"真正的达成条件或内情","reward":{"coin":10,"rep":3}}],"questDone":["已完成的任务标识"],"questDrop":["玩家拒绝或放弃的任务标识"],"items":[{"name":"物品名","desc":"用途或外观","value":20,"effect":{"hp":15,"skills":{"开锁":5}},"consumable":true}],"abilities":["新掌握的能力"],"anchorAdd":["必须始终成立、不可违背或遗忘的核心事实"]。物品尽量带 desc/value/effect/consumable，让玩家能真正使用；只有纯线索可以只写名称字符串。任务系统对玩家完全不可见，不要在剧情里提及；玩家可以不理会任务，NPC 不要反复催办。可以同时下发多个任务。没有时分别留空数组或省略。',
     '隐藏主线用 "hiddenQuest":{"title":"本阶段标题","desc":"本阶段需要达成什么","stakes":"失败时的结局文字","reward":{"coin":40,"rep":15},"status":"active/done/failed","final":false}。建立当前阶段时填 title、desc、stakes、reward；完成时把 status 设为 done（系统会奖励并提示你开启下一阶段）；最终阶段完成时设 final=true 或直接给出 end。玩家看不到这个字段。',
     '无限模式建立新篇章时，同时用 "foreshadowAdd":[{"hint":"具体细节或异常","conflict":"会威胁谁、引发什么冲突","basis":"建立在哪个已发生事实/人物/地点上","due":4}] 埋 1~3 条伏笔；推进或回收时用 "foreshadowDone":["伏笔id或hint"]。没有冲突或没有依据的伏笔不要写；due 是预计多少故事小时后推进，伏笔要在 2~6 个故事小时内真正推进或回收，不能只埋不收。',
@@ -229,12 +256,13 @@ function worldWindowText(state,fullContext = !state.turn){
   const full = state.world || "";
   if(!full) return "";
   const total = full.length;
-  // 控制单次预填充长度：开头约 1 万字，续玩约 6 千字，保留进入点前后文。
+  // 控制单次预填充长度：前情多、后文少，避免模型提前看到太远的后续。
   const size = state.worldSummary && !fullContext ? 6000 : 10000;
   const pos = Math.max(0, Math.min(Number(state.worldWindow) || 0, Math.max(0,total-1)));
-  const beforeChars = Math.min(pos, Math.max(1200, Math.round(size*0.15)));
+  const afterChars = fullContext ? 1200 : 800;
+  const beforeChars = Math.max(1200, size-afterChars);
   const start = Math.max(0, pos-beforeChars);
-  const end = Math.min(total, Math.max(start+size, pos + (size-beforeChars)));
+  const end = Math.min(total, pos+afterChars);
   const chunk = full.slice(start, end);
   const rel = pos-start;
   const head = start > 0 ? "……（前文省略）\n" : "";
@@ -246,6 +274,8 @@ function worldWindowText(state,fullContext = !state.turn){
 function advanceWorldWindow(state, turn, progress){
   const full = state.world || "";
   if(!full) return state.worldWindow||0;
+  // 玩家选定的起点优先：第一幕不允许 AI 的 worldProgress 把窗口拉回别处。
+  if((state.turn||0) === 0 && state.worldWindow) return state.worldWindow;
   if(Number.isFinite(progress)){
     const pct = Math.max(0, Math.min(100, progress));
     return Math.max(0, Math.min(full.length - 1, Math.floor(full.length * pct / 100)));
@@ -631,10 +661,66 @@ function restoreLifeEvents(state){
   if(Array.isArray(state.present)) state.present = state.present.filter(name=>!dead.has(name));
 }
 
+function npcAgencyPrompt(state){
+  if(!state || !state.turn || state.turn % 6 !== 0) return null;
+  if(state.intimateActive || (state.afterglow||0)>0) return null;
+  const present = new Set(state.present||[]);
+  const cast = (state.cast||[]).filter(c=>c && !c.dead && !c.group && !present.has(c.name) && (c.agenda || c.goal));
+  if(!cast.length) return null;
+  const pick = cast[Math.floor(state.turn/3) % cast.length];
+  return {role:"system",content:"【NPC 主动行动】本幕让不在场的「"+pick.name+"」按自己的目的行动一次。TA 现在的打算是："+(pick.agenda||pick.goal)+"。写一件具体发生的事——抢先一步、托人带话、改变局面、犯错或求助——并用 consequence.fact 或 memoryAdd 记录；让玩家之后能观察到影响。不要把 TA 硬拉到现场，也不要替玩家行动。"};
+}
+
+function chapterLoopPrompt(state){
+  if(state.intimateActive || (state.afterglow||0)>0) return null;
+  const loops = state.openLoops || [];
+  const env = state.environment || {};
+  const nowMinute = Number.isFinite(env.minute) ? env.minute : 0;
+  const chapterAge = state.chapter && Number.isFinite(state.chapter.startedMinute)
+    ? nowMinute - state.chapter.startedMinute : null;
+  const stale = loops.filter(l=>{
+    if(!l) return false;
+    if(Number.isFinite(l.createdMinute) && Number.isFinite(env.minute)) return nowMinute - l.createdMinute >= 720;
+    return (state.turn||0)-(l.createdTurn||state.turn||0) >= 16;
+  });
+  const needsChapter = !state.chapter || (chapterAge!==null && chapterAge>=480);
+  const titleAge = state.chapter && Number.isFinite(state.chapter.titleMinute)
+    ? nowMinute - state.chapter.titleMinute : chapterAge;
+  const parts = [];
+  if(needsChapter) parts.push("在篇章确实需要推进时，用 chapter:{title,goal,stakes,next,phase} 更新当前篇章；连续对话或同一场景里不要仅因为幕数增加就换篇章。phase 用 setup/complication/reversal/climax/aftermath 之一");
+  if(titleAge!==null && titleAge>=2880 && (!Number.isFinite(state.lastTitleNudgeMinute) || nowMinute-state.lastTitleNudgeMinute>=360)){
+    parts.push("当前篇章标题已经沿用超过两天，本幕必须给 chapter 一个新的 title，让标题体现当前阶段发生的事（例如从「码头问沉船」变成「柴屋换人」），不要继续沿用旧标题");
+    state.lastTitleNudgeMinute = nowMinute;
+  }
+  if(!loops.length) parts.push("用 loopsAdd 新增 1~2 条真正有后果的未了事项（承诺、欠债、期限、仇怨、失踪、伏笔）");
+  if(loops.length>=7 || stale.length) parts.push("用 loopsDone 收回至少一条过旧或已解决的未了事项，不要无限堆积");
+  else if(loops.length && (!Number.isFinite(state.lastLoopNudgeMinute) || nowMinute-state.lastLoopNudgeMinute>=240)){
+    parts.push("如果自然，推进或回收一条 openLoops；没有合适时机就不要硬打断当前对话");
+    state.lastLoopNudgeMinute = nowMinute;
+  }
+  if(!parts.length) return null;
+  return {role:"system",content:"【篇章与未了事项】"+parts.join("；")+"。不要为了凑数硬造无关线索，未了事项必须接在已发生的人物、地点或承诺上。"};
+}
+
+function repetitionPrompt(state){
+  if(!state || state.intimateActive || (state.afterglow||0)>0) return null;
+  const hist = (state.sceneHistory||[]).slice(-4);
+  if(hist.length<3) return null;
+  const last = hist[hist.length-1];
+  const samePlace = last.place && hist.filter(h=>h.place===last.place).length>=3;
+  const sameScene = last.scene && hist.filter(h=>h.scene===last.scene).length>=2;
+  const sameAdvance = last.advance && hist.filter(h=>h.advance===last.advance).length>=2;
+  if(!sameScene && !sameAdvance) return null;
+  return {role:"system",content:"【反重复】最近几幕反复停在"+(samePlace ? "同一地点「"+last.place+"」" : "同一类场景")
+    +(sameScene ? "、同一种场面" : "")+(sameAdvance ? "、同一种推进方式" : "")
+    +"。本幕必须换一种推进：改变时间、地点、参与者或冲突形式之一，或跳一段时间直接切到下一个有意义的节点。不要再用同一套试探、追问、门外脚步、路人传话或日常琐事循环；新人物、新证据、新阴谋必须接在已发生的事实和人物动机上，不能凭空发明来解开僵局。"};
+}
+
 function buildMemoryContext(state,due = [],focus=""){
-  const mem = (state.memory||[]).length ? state.memory.map((m,i)=>(i+1)+". "+m).join("\n") : "（尚无）";
+  const memoryFirst = typeof memoryFirstEnabled==="function" && memoryFirstEnabled();
+  const mem = (state.memory||[]).length ? state.memory.slice(memoryFirst ? -8 : -12).map((m,i)=>(i+1)+". "+m).join("\n") : "（尚无）";
   const sum = state.summary || "（尚无，故事刚开始）";
-  const activeQuests = (state.quests||[]).filter(q=>!q.abandoned);
+  const activeQuests = (state.quests||[]).filter(q=>!q.abandoned).slice(0,8);
   const quests = activeQuests.length ? activeQuests.map(q=>{
     let s = q.title+(q.done?"（已完成）":"（进行中）");
     if(!q.done) s += "【编号："+q.id+"，奖励："+JSON.stringify(q.reward || {})+"】";
@@ -647,26 +733,39 @@ function buildMemoryContext(state,due = [],focus=""){
   const cast = state.cast.filter((c,i)=>{
     if(inScene.has(c.name)) return true;                    // 在场者必保留
     if(reportNames.has(c.name)) return true;                // 与未结报警相关者必保留
-    if((c.wanted||0)>=40 || (c.hp||100)<=20) return true;    // 通缉高或重伤的关键人物必保留
-    return i>=state.cast.length-24;                          // 其余保留最近 24 个
-  });
-  const consequences = state.consequences.filter((c,i)=>c.status==="pending"||i>=state.consequences.length-16);
+    if((state.aff?.[c.name]||0)>=50 || (c.wanted||0)>=40 || (c.hp||100)<=20) return true;
+    return i>=state.cast.length-(memoryFirst ? 8 : 12);      // 其余只保留最近若干个，控制上下文
+  }).map(c=>({
+    ...c,
+    background:String(c.background||"").slice(0,220),
+    knows:String(c.knows||"").slice(0,220),
+    personality:String(c.personality||"").slice(0,120),
+    goal:String(c.goal||"").slice(0,120),
+    attitude:String(c.attitude||"").slice(0,120),
+    routine:String(c.routine||"").slice(0,120),
+    appearance:String(c.appearance||"").slice(0,140),
+    outfit:String(c.outfit||"").slice(0,120),
+    changes:(Array.isArray(c.changes)?c.changes:[]).slice(-2),
+    memories:(Array.isArray(c.memories)?c.memories:[]).slice(-6),
+    links:(Array.isArray(c.links)?c.links:[]).slice(-4)
+  }));
+  const consequences = state.consequences.filter((c,i)=>c.status==="pending"||i>=state.consequences.length-(memoryFirst ? 6 : 10));
   const env = state.environment;
   const anchors = (state.anchors||[]).length
-    ? state.anchors.map((a,i)=>(i+1)+". "+a).join("\n")
+    ? state.anchors.slice(memoryFirst ? -8 : -12).map((a,i)=>(i+1)+". "+a).join("\n")
     : "（尚无。遇到必须始终成立的核心事实、世界规则或人物核心特质时，用 anchorAdd 记录）";
   const hq = state.hiddenQuest;
   const hiddenLine = hq
     ? JSON.stringify({stage:hq.stage||1,stageHours:(Number.isFinite(state.hiddenStageStartedMinute)&&Number.isFinite(env?.minute)?Math.floor((env.minute-state.hiddenStageStartedMinute)/60):null),title:hq.title,desc:hq.desc,stakes:hq.stakes,status:hq.status,reward:hq.reward,final:Boolean(hq.final)})
     : "尚未建立，请在开场自创或依原著设定";
   const arcLine = (state.hiddenArc||[]).length
-    ? "\n【已完成的隐藏阶段】"+(state.hiddenArc||[]).map(a=>"第"+(a.stage||"?")+"阶段："+a.title+"（"+(a.outcome==="failed"?"失败":"已完成")+"）").join("；")
+    ? "\n【已完成的隐藏阶段】"+(state.hiddenArc||[]).slice(-4).map(a=>"第"+(a.stage||"?")+"阶段："+a.title+"（"+(a.outcome==="failed"?"失败":"已完成")+"）").join("；")
     : "";
   const nextLine = state.hiddenNextPending ? "\n【下一阶段】上一阶段已完成，本幕需用 hiddenQuest（status=active）开启承接它的新阶段。" : "";
   const dv = ensureDrives(state);
   const driveStr = DRIVE_KEYS.map(k=>DRIVE_META[k].label+" "+dv[k]).join(" / ");
   const hotNow = (state.present||[]).some(n=>{ const c=(state.cast||[]).find(x=>x.name===n); return c && c.adult!==false && (c.desire||0)>=55; });
-  const bondsText = (state.cast||[]).flatMap(c => (c.links||[]).map(l=>c.name+"→"+l.name+(l.relation?("（"+l.relation+"）"):"")+(Number.isFinite(l.aff)?(" 好感"+l.aff):"")+(Number.isFinite(l.desire)?(" 欲望"+l.desire):""))).slice(0,14).join("；") || "无";
+  const bondsText = (state.cast||[]).flatMap(c => (c.links||[]).map(l=>c.name+"→"+l.name+(l.relation?("（"+l.relation+"）"):"")+(Number.isFinite(l.aff)?(" 好感"+l.aff):"")+(Number.isFinite(l.desire)?(" 欲望"+l.desire):""))).slice(0,10).join("；") || "无";
   const scheduleText = (state.present||[]).map(n=>{
     const c = (state.cast||[]).find(x=>x.name===n);
     if(!c || (!c.job && !c.routine)) return "";
@@ -681,14 +780,18 @@ function buildMemoryContext(state,due = [],focus=""){
     ? bibleSectionEvidence(activeBuiltinBible,state.worldWindow) : state.worldBible?.sectionEvidence;
   return [
     "【剧情摘要】"+sum,
-    ...(state.longTerm ? ["【长期摘要】"+state.longTerm] : []),
+    ...(state.longTerm ? ["【长期摘要】"+String(state.longTerm).slice(memoryFirst ? -900 : -1600)] : []),
     "【叙事骨架】"+(state.storyTemplate ? (state.storyTemplate.id+"："+state.storyTemplate.premise) : "（未指定，可自由发挥）")+bibleText,
     ...(sectionEvidence?.length ? ["【原文章节参考，仅用于核对当前阶段】"
       +sectionEvidence.map(s=>s.title+"："+s.reference).join("；")
       +"。原文中后续出现的事只是参考，不能当作本局已发生的事实。"] : []),
     "【核心设定（始终成立，不可违背）】\n"+anchors,
-    "【故事环境】"+JSON.stringify({...env,storyTime:formatStoryTime(env.minute)||"尚未建立"}),
+    "【故事环境】"+JSON.stringify({...env,storyTime:formatStoryTime(env.minute,state)||"尚未建立"}),
     "【当前主线】"+JSON.stringify(state.plot),
+    "【当前篇章（按时间与事件推进，不按幕数）】"+(state.chapter ? JSON.stringify(state.chapter) : "（尚未建立，请用 chapter 建立 title/goal/stakes/next/phase）"),
+    "【未了事项（有合适时机再推进或回收，不要硬打断）】"+((state.openLoops||[]).length
+      ? state.openLoops.slice(-8).map(l=>"["+(l.id||"?")+"] "+l.text+(l.dueMinute?("（约 "+formatStoryTime(l.dueMinute,state)+" 到期）"):(l.dueTurn?("（第"+l.dueTurn+"幕到期）"):""))).join("；")
+      : "（无，请用 loopsAdd 新增 1~2 条真正有后果的线索）"),
     "【本路线已成立的事实与后续】"+JSON.stringify(consequences),
     "【本幕开场已发生的后续，不可改回】"+(due.map(c=>c.followUp).join("；")||"无"),
     "【在场人物】"+(Array.isArray(state.present) ? (state.present.join("、")||"玩家独处") : "尚未记录"),
@@ -704,7 +807,9 @@ function buildMemoryContext(state,due = [],focus=""){
     "【欲望（五维，与好感/亲密度是两套系统，玩家不可见）】你："+driveStr+"。性欲靠性行为释放；金钱/权力/物品靠获得对应资源满足；「人」靠情感连接与陪伴满足。成年 NPC 的性欲越高越会主动靠近、暗示或寻求独处，但必须双方自愿、可以拒绝。",
     "【当下优先】"+(hotNow ? "在场有人欲望已经很高：本幕先放下任务、账目与主线，只写两人之间的靠近与索求；NPC 不会在这时提任务或借任务撩拨。" : "（无特殊）"),
     "【人物之间的关系（NPC↔NPC，玩家可能不知情）】"+bondsText+"。角色之间会私下互动、结盟、嫉妒、敌对或相互吸引，不必都围绕玩家。",
-    "【欲望与爱意的边界】欲望不排他，可以同时对多人；好感/爱意排他、要求专一。当前与玩家好感较高（≥50）的人："+((Object.entries(state.aff||{}).filter(([n,v])=>v>=50).map(([n])=>n).join("、"))||"无")+"。若同时推进多段恋爱，角色会嫉妒、质问、要求选择或疏远；发生关系不等于爱上，别把每个聊过天的人都写成恋人。",
+    (relationshipModeOf(state)==="open"
+      ? "【欲望与爱意的边界】欲望不排他；本局为开放关系模式，多人恋爱、三人行与多伴侣在知情同意下可以成立，不默认吃醋或宫斗，冲突只来自隐瞒、失信和越界。当前与玩家好感较高（≥50）的人："+((Object.entries(state.aff||{}).filter(([n,v])=>v>=50).map(([n])=>n).join("、"))||"无")+"。发生关系不等于爱上，别把每个聊过天的人都写成恋人。"
+      : "【欲望与爱意的边界】欲望不排他，可以同时对多人；好感/爱意排他、要求专一。当前与玩家好感较高（≥50）的人："+((Object.entries(state.aff||{}).filter(([n,v])=>v>=50).map(([n])=>n).join("、"))||"无")+"。若同时推进多段恋爱，角色会嫉妒、质问、要求选择或疏远；发生关系不等于爱上，别把每个聊过天的人都写成恋人。"),
     "【亲密关系与偏好（玩家不可见，供你把握分寸）】"+intimacyLine(state),
     "【社会关系网（玩家可知的人脉、靠山与敌人）】"+((state.social||[]).length ? JSON.stringify(state.social) : "无")
   ].join("\n");
@@ -823,6 +928,10 @@ function buildStateContext(state,hasPlayerInput){
     ? "\n【不可遗忘的事实】"+state.keyFacts.slice(-12).join("；")
     : "";
   const clockStr = "\n【当前时间】"+formatClock(state)+(state.birth ? ("；你的出生："+formatDateParts(state.birth,false)) : "")+(state.environment?.weather ? ("；当前天气："+state.environment.weather+"（系统维护，不要改写）") : "");
+  const playerRuleStr = (function(){
+    const name = String(state.playerIdentity?.name || state.worldRole?.name || "").trim();
+    return name ? "\n【玩家角色】「"+name+"」是玩家本人。不要把这个名字放进 characters、present、entered 或 left，不要让其以 NPC 身份在 beats 里说话或行动；玩家自己的行动由玩家输入决定。" : "";
+  })();
   const playerEcoStr = "\n【你的经济】"+economicModeLabel(state)+"；收入："+incomePlanText(state.incomePlan,state.incomePerDay||0)+"；存款 "+(Number.isFinite(state.savings)?state.savings:"未记录")+"；现金 "+(state.coin||0)+"；资产："+assetsText(state.assets)+"；食物 "+(state.food||0)
     +((state.expensePlans||[]).length ? "；定期开销："+state.expensePlans.map(p=>p.name+" "+expensePlanText(p,curName(state))).join("；") : "")
     +((state.contracts||[]).length ? "\n【生效中的合同】"+state.contracts.map(c=>c.item+"："+contractText(state,c)).join("；") : "");
@@ -833,7 +942,7 @@ function buildStateContext(state,hasPlayerInput){
     });
     return list.length ? "\n【人物经济】"+list.join("；") : "";
   })();
-  return `下一幕：第 ${state.turn+1} 幕。当前场景：${sceneStr}。人物好感：${affStr}。${cur} ${state.coin}，${hpStr}，欲望（${drivesStr}），当前圈子口碑 ${localReputation(state).label}，道德 ${mor}（${morLabel}）${wantStr}${concealStr}${debtStr}。${turnType}\n【货币】本世界使用「${cur}」。物价参考：${curScale}effects.coin 与 choices.effect.coin 都以这个单位结算，不要换算成别的货币。\n【玩家身份与属性】职业：${careerStr}；性别 ${genderStr}；物种 ${state.species||"未定（按设定与身份判断，非人类要写清形态）"}；营生 ${incomeStr}；年龄 ${ageText}；外形 ${bodyText}；${attrStr}${combatStr}\n【技能】${skillStr}\n【进行中任务】${questStr}\n【已有物品】${itemStr}\n【已有能力】${abilityStr}${idleNote}${offstageStr}${seedStr}${ledgerStr}${factsStr}${clockStr}${playerEcoStr}${npcEcoStr}`;
+  return `下一幕：第 ${state.turn+1} 幕。当前场景：${sceneStr}。人物好感：${affStr}。${cur} ${state.coin}，${hpStr}，欲望（${drivesStr}），当前圈子口碑 ${localReputation(state).label}，道德 ${mor}（${morLabel}）${wantStr}${concealStr}${debtStr}。${turnType}\n【货币】本世界使用「${cur}」。物价参考：${curScale}effects.coin 与 choices.effect.coin 都以这个单位结算，不要换算成别的货币。\n【玩家身份与属性】职业：${careerStr}；性别 ${genderStr}；物种 ${state.species||"未定（按设定与身份判断，非人类要写清形态）"}；营生 ${incomeStr}；年龄 ${ageText}；外形 ${bodyText}；${attrStr}${combatStr}\n【技能】${skillStr}\n【进行中任务】${questStr}\n【已有物品】${itemStr}\n【已有能力】${abilityStr}${idleNote}${offstageStr}${seedStr}${ledgerStr}${factsStr}${clockStr}${playerEcoStr}${npcEcoStr}${playerRuleStr}`;
 }
 
 const MAX_MODEL_CONTENT = 30000;
@@ -856,6 +965,53 @@ function waitForModelRequest(request,signal){
   });
 }
 
+function nativeLLMStream(plugin,url,headers,payload,signal,onProgress){
+  return new Promise(async (resolve,reject)=>{
+    const requestId = "r"+Date.now().toString(36)+Math.random().toString(36).slice(2,8);
+    let text = "", settled = false, cleaned = false;
+    const handles = [];
+    const cleanup = ()=>{
+      if(cleaned) return;
+      cleaned = true;
+      for(const handle of handles){ try{ handle && handle.remove && handle.remove(); }catch(e){} }
+      if(signal) signal.removeEventListener("abort",abort);
+    };
+    const finish = (fn,value)=>{ if(settled) return; settled = true; cleanup(); fn(value); };
+    const abort = ()=>{
+      if(settled) return;
+      try{ plugin.cancel({requestId}); }catch(e){}
+      const err = new Error("已取消");
+      err.name = "AbortError";
+      finish(reject,err);
+    };
+    if(signal){
+      if(signal.aborted){ abort(); return; }
+      signal.addEventListener("abort",abort,{once:true});
+    }
+    try{
+      handles.push(await plugin.addListener("chunk",data=>{
+        if(!data || data.requestId!==requestId || settled) return;
+        text += String(data.content||"");
+        if(text.length>MAX_MODEL_CONTENT){ const err=new Error("AI 返回的内容过长"); finish(reject,err); try{plugin.cancel({requestId});}catch(e){} return; }
+        if(onProgress) onProgress(text);
+      }));
+      handles.push(await plugin.addListener("done",data=>{
+        if(!data || data.requestId!==requestId || settled) return;
+        if(!text.trim()){ finish(reject,new Error("AI 未返回剧情，请重试")); return; }
+        finish(resolve,text);
+      }));
+      handles.push(await plugin.addListener("error",data=>{
+        if(!data || data.requestId!==requestId || settled) return;
+        finish(reject,new Error(data.message || "AI 服务中断了这段剧情"));
+      }));
+      const started = await plugin.start({url,headers,body:JSON.stringify({...payload,stream:true}),requestId});
+      if(!started || started.started===false) throw new Error("原生流式请求启动失败");
+    }catch(e){
+      finish(reject,e);
+    }
+  });
+}
+
 async function callLLM(messages, signal, onProgress, opts = {}){
   signal?.throwIfAborted();
   const provider = opts.provider || LLM_PROVIDER;
@@ -867,6 +1023,10 @@ async function callLLM(messages, signal, onProgress, opts = {}){
     const headers = {"Content-Type":"application/json",...(cfg.key ? {Authorization:"Bearer "+cfg.key} : {})};
     const payload = {model:cfg.model,messages,temperature:Number.isFinite(opts.temperature) ? opts.temperature : 0.95,max_tokens:1800};
     const native = typeof window!=="undefined" && window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform();
+    const llmPlugin = native && window.Capacitor.Plugins && window.Capacitor.Plugins.NativeLLM;
+    if(llmPlugin){
+      return await nativeLLMStream(llmPlugin,url,headers,payload,signal,onProgress);
+    }
     const httpPlugin = native && window.Capacitor.Plugins && window.Capacitor.Plugins.CapacitorHttp;
     if(httpPlugin){
       // APK 内用原生 HTTP，绕过 WebView 的 CORS 限制；非流式
@@ -1129,6 +1289,20 @@ function readScene(raw){
     conflict:short(obj.plot?.conflict,160),
     next:short(obj.plot?.next,160)
   };
+  const chapter = (obj.chapter && typeof obj.chapter==="object") ? {
+    title:short(obj.chapter.title,80), goal:short(obj.chapter.goal,180),
+    stakes:short(obj.chapter.stakes,180), next:short(obj.chapter.next,160),
+    phase:short(obj.chapter.phase,40)
+  } : null;
+  const loopsAdd = Array.isArray(obj.loopsAdd) ? obj.loopsAdd.slice(0,4).map(l=>({
+    id:short(l?.id,40), text:short(l?.text,180), kind:short(l?.kind,30),
+    dueTurn:Number.isFinite(l?.dueTurn) ? clamp(Math.round(l.dueTurn),1,100000) : null,
+    dueMinute:Number.isFinite(l?.dueMinute) ? clamp(Math.round(l.dueMinute),0,5256000) : null,
+    dueInMinutes:Number.isFinite(l?.dueInMinutes) ? clamp(Math.round(l.dueInMinutes),0,5256000) : null,
+    participants:Array.isArray(l?.participants) ? l.participants.map(n=>short(n,60)).filter(Boolean).slice(0,6) : []
+  })).filter(l=>l.text || l.id) : [];
+  const loopsDone = Array.isArray(obj.loopsDone)
+    ? obj.loopsDone.map(id=>short(id,80)).filter(Boolean).slice(0,6) : [];
   const characters = (Array.isArray(obj.characters) ? obj.characters : []).slice(0,6).map(c=>({
     name:short(c?.name,60),
     background:short(c?.background,240),
@@ -1226,7 +1400,7 @@ function readScene(raw){
     note: ck ? short(ck.note ?? ck.text,200) : ""
   } : null;
   return {
-    lines, ending, plot, present, characters, environment, effects:readEffects(obj.effects),
+    lines, ending, plot, chapter, loopsAdd, loopsDone, present, characters, environment, effects:readEffects(obj.effects),
     lifeEvents:readLifeEvents(obj.lifeEvents),
     lifeNews:Array.isArray(obj.lifeNews) ? obj.lifeNews.slice(0,12).map(n=>({
       eventId:short(n?.eventId,32),from:short(n?.from,60),to:short(n?.to,60)
@@ -1358,11 +1532,15 @@ function readScene(raw){
   };
 }
 
-function formatStoryTime(minute){
+function weekdayCn(date){
+  return ["周日","周一","周二","周三","周四","周五","周六"][date.getUTCDay()] || "";
+}
+function formatStoryTime(minute,state){
   if(!Number.isSafeInteger(minute) || minute<0) return "";
   const hour = String(Math.floor(minute/60)%24).padStart(2,"0");
   const rest = String(minute%60).padStart(2,"0");
-  return "第 "+(Math.floor(minute/1440)+1)+" 天 "+hour+":"+rest;
+  const weekday = state ? (" "+weekdayCn(addMinutes(dateFromParts(startDateOf(state)),minute))) : "";
+  return "第 "+(Math.floor(minute/1440)+1)+" 天"+weekday+" "+hour+":"+rest;
 }
 
 function validDateParts(p){
@@ -1399,7 +1577,10 @@ function formatDateParts(p, withTime=true){
   const date = p.year+"-"+pad(p.month)+"-"+pad(p.day);
   return withTime ? date+" "+pad(p.hour||0)+":"+pad(p.minute||0)+":"+pad(p.second||0) : date;
 }
-function formatClock(state){ return formatDateParts(partsFromDate(clockNow(state))); }
+function formatClock(state){
+  const d = clockNow(state);
+  return formatDateParts(partsFromDate(d))+" "+weekdayCn(d);
+}
 function partsFromDate(d){
   return {year:d.getUTCFullYear(),month:d.getUTCMonth()+1,day:d.getUTCDate(),hour:d.getUTCHours(),minute:d.getUTCMinutes(),second:d.getUTCSeconds()};
 }
@@ -1415,7 +1596,7 @@ function syncAge(obj, now){
   if(!c) return;
   obj.age = c.age;
   obj.ageMonths = c.ageMonths;
-  if(obj.age >= 18 && obj.adult === false) obj.adult = true;
+  if(!obj.group && obj.age >= 18 && obj.adult === false) obj.adult = true;
 }
 function ensureBirth(obj,now,seed){
   if(!obj || validDateParts(obj.birth)) return;
@@ -1455,13 +1636,10 @@ function formatDuration(minutes){
   if(h) return h+" 小时";
   return m+" 分钟";
 }
-function readTimeSkip(text){
-  const s = String(text||"").trim();
-  const command = /^(?:我(?:决定|选择)?\s*)?(?:原地|在原地)?\s*(?:把时间(?:直接)?(?:推进|跳过)|(?:直接)?(?:推进(?:时间)?|跳过|快进|跳到)|时间(?:直接)?(?:推进|跳过)|等(?:待|了)?(?:到)?|再等|睡(?:了)?|休息|闭关|养伤|修炼|冬眠|充电)\s*/.exec(s);
-  if(!command || /[？?]|可以吗|行吗|好吗|要不要|能不能/.test(s)) return null;
-  let remaining = s.slice(command[0].length);
+function parseDurationText(input){
   const re = /^(\d+|[零一二两三四五六七八九十百千]+|半)\s*(?:个\s*)?(小时|钟头|分钟|年|月|周|星期|天|日)(?:\s*(?:又|零|加)\s*)?/;
   const units = {小时:60,钟头:60,分钟:1,周:10080,星期:10080,天:1440,日:1440};
+  let remaining = String(input||"").trim();
   let months = 0, minutes = 0, match;
   while((match = re.exec(remaining))){
     const count = match[1]==="半" ? 0.5 : cnNumber(match[1]);
@@ -1470,11 +1648,78 @@ function readTimeSkip(text){
     else minutes += count*units[unit];
     remaining = remaining.slice(match[0].length).trimStart();
   }
-  if(!/^(?:半|后|之后|以后|再|就|左右|[，。！!、,.]|$)/.test(remaining)) return null;
-  if(remaining.startsWith("半") && /(小时|钟头)/.test(s)) minutes+=30;
+  if(remaining.startsWith("半") && /(小时|钟头)/.test(input)) minutes+=30;
   if(months%1) minutes+=21600;
   months = Math.min(120,Math.floor(months));
-  return months || minutes ? {months,minutes:Math.min(5256000,Math.round(minutes))} : null;
+  return {months,minutes:Math.min(5256000,Math.round(minutes)),remaining};
+}
+function clockTarget(state,hour,minute=0,days=0){
+  const now = clockNow(state);
+  const target = new Date(now);
+  target.setUTCHours(hour,minute,0,0);
+  if(days) target.setUTCDate(target.getUTCDate()+days);
+  if(target<=now){
+    if(!days && hour>=18) target.setTime(now.getTime()+120*60000);
+    else target.setUTCDate(target.getUTCDate()+1);
+  }
+  return target;
+}
+function weekdayTarget(state,weekday){
+  const now = clockNow(state);
+  const target = new Date(now);
+  let delta = (weekday - target.getUTCDay() + 7) % 7;
+  if(delta===0) delta = 7;
+  target.setUTCDate(target.getUTCDate()+delta);
+  target.setUTCHours(6,0,0,0);
+  return target;
+}
+function targetSkip(state,target){
+  if(!state || !target) return null;
+  const diff = Math.min(5270400, Math.max(0, Math.round((target-clockNow(state))/60000)));
+  return diff ? {months:0,minutes:diff} : null;
+}
+function readTimeSkip(text,state){
+  const s = String(text||"").trim();
+  if(!s || /[？?]|可以吗|行吗|好吗|要不要|能不能|会不会|什么时候|多久/.test(s)) return null;
+  const command = /^(?:我(?:决定|选择)?\s*)?(?:原地|在原地)?\s*(?:把时间(?:直接)?(?:推进|跳过)|(?:直接)?(?:推进(?:时间)?|跳过|快进|跳到)|时间(?:直接)?(?:推进|跳过)|等(?:待|了)?(?:到)?|再等|睡(?:了)?|休息|闭关|养伤|修炼|冬眠|充电)\s*/.exec(s);
+  if(command){
+    const parsed = parseDurationText(s.slice(command[0].length));
+    if(/^(?:半|后|之后|以后|再|就|左右|[，。！!、,.]|$)/.test(parsed.remaining)){
+      if(parsed.months || parsed.minutes) return {months:parsed.months,minutes:parsed.minutes};
+    }
+  }
+  if(state){
+    const wm = /(下周|下星期)\s*([一二三四五六日天])/.exec(s);
+    if(wm){
+      const map = {一:1,二:2,三:3,四:4,五:5,六:6,日:0,天:0};
+      if(map[wm[2]]!==undefined) { const skip = targetSkip(state,weekdayTarget(state,map[wm[2]])); if(skip) return skip; }
+    }
+    let dayOffset = null, targetHour = null;
+    if(/大后天/.test(s)) dayOffset = 3;
+    else if(/后天/.test(s)) dayOffset = 2;
+    else if(/明天|明日|明早|明晨|明晚|第二天|次日/.test(s)) dayOffset = 1;
+    else if(/今晚|今天晚上/.test(s)) dayOffset = 0;
+    if(/天亮|清晨|早上|早晨|明早|明晨/.test(s)) targetHour = 6;
+    else if(/上午/.test(s)) targetHour = 9;
+    else if(/中午|正午/.test(s)) targetHour = 12;
+    else if(/下午|午后/.test(s)) targetHour = 15;
+    else if(/傍晚/.test(s)) targetHour = 18;
+    else if(/晚上|夜里|今晚|明晚/.test(s)) targetHour = 20;
+    else if(/凌晨/.test(s)) targetHour = 3;
+    if(dayOffset!==null || targetHour!==null){
+      const skip = targetSkip(state,clockTarget(state,targetHour===null?6:targetHour,0,dayOffset===null?0:dayOffset));
+      if(skip) return skip;
+    }
+    if(/下周|下星期/.test(s)){ const skip = targetSkip(state,clockTarget(state,6,0,7)); if(skip) return skip; }
+  }
+  const fallback = /(?:等(?:了|到)?|待(?:了|到)?|过了?|又过|再过|修炼|休息|养伤|闭关|睡(?:了|到)?|赶路|走了?|隔了?)\s*(\d+|[零一二两三四五六七八九十百千]+|半)\s*(?:个\s*)?(小时|钟头|分钟|天|日|周|星期|个月|月|年)(?:\s*(?:后|之后|以后|再|整|左右))?/.exec(s)
+    || /(\d+|[零一二两三四五六七八九十百千]+|半)\s*(?:个\s*)?(小时|钟头|分钟|天|日|周|星期|个月|月|年)\s*(?:后|之后|以后|再|过去了?|整|左右)/.exec(s);
+  if(fallback){
+    const start = fallback[0].search(/\d|[零一二两三四五六七八九十百千]|半/);
+    const parsed = parseDurationText(fallback[0].slice(Math.max(0,start)));
+    if(parsed.months || parsed.minutes) return {months:parsed.months,minutes:parsed.minutes};
+  }
+  return null;
 }
 
 function timeSkipMinutes(skip,date){
@@ -1503,7 +1748,7 @@ function applyAge(state, minutes){
     obj.ageMonths = (Number(obj.ageMonths)||0) + months;
     obj.age = Number(obj.age) + Math.floor(obj.ageMonths/12);
     obj.ageMonths %= 12;
-    if(obj.age >= 18 && obj.adult === false) obj.adult = true;
+    if(!obj.group && obj.age >= 18 && obj.adult === false) obj.adult = true;
   };
   bump(state);
   for(const c of (state.cast||[])) bump(c);
@@ -1849,6 +2094,29 @@ function ensureCombat(state){
     state.combat.techniques = Array.isArray(current.techniques) ? current.techniques.slice(0,8) : [];
   }
 }
+function localCombatResolution(state, action, turn){
+  if(!state || !state.combat || !action) return null;
+  if(!/(攻击|杀|砍|刺|劈|打|揍|交手|动手|出招|拔剑|拔刀|开枪|开火|偷袭|格斗|迎战|挑战|追打)/.test(action)) return null;
+  const player = String(state.playerIdentity?.name || state.worldRole?.name || "").trim();
+  const present = (state.present||[]).filter(n=>n && n!==player);
+  let targetName = present.find(n=>action.includes(n));
+  if(!targetName && present.length===1) targetName = present[0];
+  if(!targetName) return null;
+  const c = (state.cast||[]).find(x=>x && x.name===targetName && !x.dead);
+  if(!c) return null;
+  const technique = (state.combat.techniques||[]).find(t=>t.name && action.includes(t.name));
+  const cost = Math.min(Number(technique?.cost)||0, state.combat.energy||0);
+  const playerPower = (Number(state.combat.power)||50) + (technique ? Math.round((Number(technique.power)||0)*0.35) : 0);
+  const opponentPower = Number.isFinite(c.combat?.power) ? c.combat.power : 50;
+  let h=0; const seed=String(turn)+"|"+targetName+"|"+action;
+  for(let i=0;i<seed.length;i++) h=(h*31+seed.charCodeAt(i))|0;
+  const roll = (Math.abs(h)%21)-10;
+  const diff = playerPower - opponentPower + roll;
+  const outcome = diff>=30 ? "压倒性胜利" : diff>=10 ? "胜利" : diff>=-10 ? "惨胜/僵持" : "失败";
+  const energyAfter = clamp((state.combat.energy||0)-cost,0,state.combat.energyMax||100);
+  const prompt = "【本地战斗结算（必须遵守）】玩家「"+(player||"你")+"」对「"+targetName+"」出手：玩家武力 "+playerPower+"，对方武力 "+opponentPower+"，随机修正 "+roll+"，结果「"+outcome+"」，玩家消耗"+(cost?(" "+cost+" 点内力"):"少量体力")+"，剩余内力 "+energyAfter+"。本幕必须按这个结果描写，不能写成平手、反向胜负或让对方无代价获胜；低手不能靠一句气氛描写抵消武力差距。";
+  return {prompt, targetName, outcome, energyAfter};
+}
 function ensureEconomy(state){
   if(!state) return;
   state.environment = state.environment || {};
@@ -1872,8 +2140,10 @@ function ensureEconomy(state){
   }
   if(!Array.isArray(state.assets)) state.assets = [];
   if(!Number.isFinite(state.food)) state.food = 0;
+  state.cast = dedupeCast(state.cast||[]);
   for(const c of (state.cast||[])){
     if(!c || !c.name) continue;
+    ensureNpcDefaults(c, state);
     ensureBirth(c, now, "npc:" + c.name);
     syncAge(c, now);
     if(!c.incomePlan && Number.isFinite(c.income) && c.income>0){
@@ -2048,6 +2318,16 @@ function readEffects(value){
     }
     if(Object.keys(dr).length) effects.drives = dr;
   }
+  // 五项属性成长/损耗：单幕最多 ±5，常规只给 ±1~2
+  if(value.attrs && typeof value.attrs==="object" && !Array.isArray(value.attrs)){
+    const at = {};
+    for(const k of ["iq","physique","charm","willpower","agility"]){
+      const raw = value.attrs[k];
+      const delta = typeof raw==="string" && /^[+-]?\d+$/.test(raw.trim()) ? Number(raw) : raw;
+      if(Number.isFinite(delta)) at[k] = clamp(Math.round(delta),-5,5);
+    }
+    if(Object.keys(at).length) effects.attrs = at;
+  }
   const aff = Object.entries(value.aff||{}).filter(([name,delta])=>Number.isFinite(delta) && typeof name==="string" && name.trim());
   if(aff.length) effects.aff = Object.fromEntries(aff.map(([name,delta])=>[name.trim().slice(0,60),clamp(Math.round(delta),-100,100)]));
   if(typeof value.coverUpWho==="string" && value.coverUpWho.trim()) effects.coverUpWho = value.coverUpWho.trim().slice(0,60);
@@ -2118,17 +2398,235 @@ function ensureAvatars(state){
   if(typeof AVATAR_LIB==="undefined" || !AVATAR_LIB || !state || !Array.isArray(state.cast)) return;
   const used = new Set(state.cast.map(c=>c && c.avatar).filter(Boolean));
   for(const c of state.cast){
-    if(!c || !c.name || c.avatar) continue;
+    if(!c || !c.name || c.avatar || c.group) continue;
     const id = pickAvatarFor(c, used);
     if(id){ c.avatar = id; used.add(id); }
   }
 }
 
+function npcTextHash(text){
+  let h = 0;
+  for(const ch of String(text||"")) h = (h*31 + ch.charCodeAt(0)) | 0;
+  return Math.abs(h);
+}
+function inferNpcAge(c){
+  const text = [c?.name,c?.identity,c?.job,c?.background,c?.personality,c?.tie].filter(Boolean).join(" ");
+  const h = npcTextHash(text);
+  if(/老|翁|婆|爷|奶|长老|前辈|祖|太君/.test(text)) return 55 + h%12;
+  if(/少年|少女|孩童|孩子|小厮|丫头|学徒|幼|童|小娘/.test(text)) return 13 + h%6;
+  if(/青年|公子|姑娘|小姐|书生|学生|新兵|初出茅庐/.test(text)) return 19 + h%8;
+  if(/中年|掌柜|管事|夫人|大叔|大婶|父亲|母亲|师父|老板娘|老爷/.test(text)) return 36 + h%12;
+  if(/兵|侠|商|捕|盗|医|匠|农|船|车|仆|僧|道|官|差|镖|猎|工|护卫|佣兵/.test(text)) return 27 + h%13;
+  return 24 + h%18;
+}
+function inferNpcGender(c){
+  const name = String(c?.name||"");
+  if(/妻|母|婆|娘|姑|姐|妹|嫂|婶|妇|女|小姐|夫人|太太|丫头|侍女|丫鬟|太后|公主|皇后/.test(name)) return "女";
+  if(/夫|父|爷|哥|弟|叔|伯|公|郎|少爷|先生|和尚|道士|小厮|伙计|小二|艄公|船夫|车夫|脚夫|樵夫|渔夫|猎户|货郎/.test(name)) return "男";
+  const text = [c?.identity,c?.background,c?.personality,c?.tie,c?.appearance].filter(Boolean).join(" ");
+  if(/她|姑娘|小姐|夫人|婆|母|姐|妹|女|娘|妇|婶|嫂|太后|公主|皇后|丫鬟|侍女/.test(text)) return "女";
+  if(/他|先生|公子|爷|兄|弟|父|叔|男|郎|少爷|王爷|皇帝|和尚|道士/.test(text)) return "男";
+  return "";
+}
+function isGenericNpcName(name){
+  const n = String(name||"").trim();
+  if(!n) return false;
+  return /^(?:(?:水果|杂货|杂货铺|布庄|药铺|茶摊|茶馆|茶楼|酒楼|酒馆|客栈|粮店|肉铺|书店|当铺|铁匠铺|米铺|南货|北货|码头|渡口|街口|巷口|邻桌|柜台|门口|院里|船上)?(?:店|铺|摊)?)?(?:老板|老板娘|掌柜|伙计|小二|跑堂|摊主|小贩|店员|守卫|士兵|衙役|差役|更夫|厨子|车夫|船夫|脚夫|路人|行人|看客|客人|商贩|算命先生)$/.test(n);
+}
+function inferNpcJob(c){
+  const name = String(c?.name||"");
+  const rules = [
+    [/掌柜/,"掌柜"], [/跑堂|小二/,"跑堂"], [/镖师/,"镖师"], [/艄公|船夫/,"船夫"],
+    [/车夫/,"车夫"], [/脚夫/,"脚夫"], [/伙计/,"伙计"], [/管事/,"管事"],
+    [/郎中|大夫/,"郎中"], [/账房/,"账房"], [/更夫/,"更夫"], [/厨/,"厨子"],
+    [/丫鬟|侍女/,"侍女"], [/小厮/,"小厮"], [/师父|师傅/,"师父"], [/捕快|差役|衙役/,"差役"],
+    [/兵|卒/,"兵"], [/货郎/,"货郎"], [/猎户/,"猎户"], [/渔夫/,"渔夫"]
+  ];
+  for(const [re,job] of rules) if(re.test(name)) return job;
+  return "";
+}
+function isGroupName(name){
+  const text = String(name||"").trim();
+  if(!text) return false;
+  return /^(?:两名|三人|两人|几人|数名|一群|一队|众人|人群|路人|行人)/.test(text)
+    || /(?:骑队|追兵|守卫们|士兵们|衙役|差役|手下|喽啰|家丁|打手|商队|船队|车队|巡逻队|巡夜人|黑衣人|蒙面人|众人|人群|路人|行人)$/.test(text)
+    || /[两三四五六七八九十\d]+(?:人|名|骑|个|位)$/.test(text)
+    || /们$/.test(text);
+}
+function sameNpcName(a,b){
+  const A = String(a||"").replace(/\s/g,"");
+  const B = String(b||"").replace(/\s/g,"");
+  if(!A || !B || A===B || A.length<2 || B.length<2) return false;
+  const relationTail = /^(之)?(妻|夫|母|父|子|女|兄|弟|姐|妹|夫人|相公|娘子|儿子|女儿|妻子|丈夫|父亲|母亲)$/;
+  if(A.includes(B)){
+    const extra = A.slice(A.indexOf(B)+B.length);
+    return !relationTail.test(extra);
+  }
+  if(B.includes(A)){
+    const extra = B.slice(B.indexOf(A)+A.length);
+    return !relationTail.test(extra);
+  }
+  const suffix = /(妻|夫|母|父|子|女|兄|弟|姐|妹|掌柜|管事|老板|先生|姑娘|小姐|大人|将军|老爷|夫人|公|婆)$/;
+  const sa = A.match(suffix)?.[0], sb = B.match(suffix)?.[0];
+  return !!(sa && sa===sb && A[0]===B[0] && Math.min(A.length,B.length)<=3);
+}
+function preferNpcName(a,b){
+  if(!a) return b;
+  if(!b) return a;
+  if(b.length>a.length && (b.includes(a) || sameNpcName(a,b))) return b;
+  return a;
+}
+function dedupeCast(cast){
+  const out = [];
+  for(const c of (cast||[])){
+    if(!c || !c.name) continue;
+    const hit = out.find(x=>sameNpcName(x.name,c.name));
+    if(!hit){ out.push(c); continue; }
+    const name = preferNpcName(hit.name,c.name);
+    const merged = {...hit,...c,name};
+    merged.changes = [...(hit.changes||[]),...(c.changes||[])].slice(-4);
+    const links = new Map([...(hit.links||[]),...(c.links||[])].filter(l=>l&&l.name).map(l=>[l.name,l]));
+    merged.links = [...links.values()].slice(-8);
+    merged.hp = Number.isFinite(c.hp) ? c.hp : hit.hp;
+    merged.desire = Number.isFinite(c.desire) ? Math.max(c.desire,hit.desire||0) : hit.desire;
+    merged.intimacy = Number.isFinite(c.intimacy) ? Math.max(c.intimacy,hit.intimacy||0) : hit.intimacy;
+    out[out.indexOf(hit)] = merged;
+  }
+  return out;
+}
+function ensureNpcDefaults(c, state){
+  if(!c || !c.name) return c;
+  c.group = c.group===true || isGroupName(c.name);
+  if(c.group){
+    c.adult = false;
+    c.kinks = [];
+    c.desire = 0;
+    c.intimacy = 0;
+  }
+  if(c.transient===undefined){
+    const bonded = !!(c.tie || (c.links&&c.links.length) || c.core || c.recurring || c.antagonist || c.nemesis
+      || (state?.aff?.[c.name]||0)>=30 || (state?.intimacy?.[c.name]||0)>=15
+      || (state?.anchors||[]).some(a=>String(a).includes(c.name)));
+    c.transient = !bonded && isGenericNpcName(c.name);
+  }
+  if(c.transient && !isGenericNpcName(c.name) && !c.tie && !c.core && !c.recurring){
+    // 有具体姓名、关系或长期用途的角色，不按临时路人处理
+    if((state?.aff?.[c.name]||0)>=30 || (state?.intimacy?.[c.name]||0)>=15) c.transient = false;
+  }
+  if(!c.job) c.job = inferNpcJob(c) || c.identity || "";
+  if(!c.identity) c.identity = c.job;
+  c.attrs = inferRoleAttrs(c);
+  if(!Number.isFinite(Number(c.age)) || Number(c.age) <= 0){ c.age = inferNpcAge(c); c.ageInferred = true; }
+  c.age = Math.max(1, Math.round(Number(c.age)));
+  if(!c.gender){ c.gender = inferNpcGender(c); if(c.gender) c.genderInferred = true; }
+  if(!c.species) c.species = "人类";
+  if(c.adult===undefined) c.adult = c.age>=18;
+  if(c.age<18) c.adult = false;
+  if(!Number.isFinite(c.hp)) c.hp = 100;
+  if(!Number.isFinite(c.coin)) c.coin = 0;
+  if(!Number.isFinite(c.rep)) c.rep = 0;
+  if(!Number.isFinite(c.moral)) c.moral = 0;
+  if(!Number.isFinite(c.wanted)) c.wanted = 0;
+  if(!Number.isFinite(c.desire)) c.desire = 0;
+  if(!Number.isFinite(c.intimacy)) c.intimacy = 0;
+  if(!Array.isArray(c.links)) c.links = [];
+  if(!Array.isArray(c.changes)) c.changes = [];
+  if(!Array.isArray(c.memories)) c.memories = [];
+  if(!c.attitude) c.attitude = "态度未明";
+  if(!c.agenda) c.agenda = c.goal || "";
+  if(!c.wealth) c.wealth = c.job && c.job!=="身份未明" ? ("靠"+c.job+"谋生") : "未有记录";
+  if(!c.combat && typeof combatProfileFor==="function"){
+    const profile = combatProfileFor(state);
+    if(profile){
+      const power = clamp(Math.round((c.attrs.physique||50)*0.65 + (c.attrs.agility||50)*0.35),10,140);
+      const energy = clamp(Math.round(24 + (c.attrs.physique||50)*0.55),20,160);
+      c.combat = {mode:profile.id,power,energy,energyMax:energy,techniques:[]};
+    }
+  }
+  return c;
+}
+function npcProfileMissing(c){
+  if(!c || !c.name || c.dead || c.group) return false;
+  return !String(c.appearance||"").trim() || !String(c.outfit||"").trim()
+    || !String(c.voice||"").trim() || !String(c.routine||"").trim()
+    || !String(c.personality||"").trim() || !String(c.background||"").trim();
+}
+let npcEnrichTimer = null;
+let npcEnrichBusy = false;
+function scheduleNpcEnrichment(state){
+  if(!state || !state.ai || state.ending) return;
+  if(state.npcEnrichPending) return;
+  if(state.npcEnrichTurn && (state.turn||0)-state.npcEnrichTurn < 2) return;
+  const pending = (state.cast||[]).filter(npcProfileMissing);
+  if(!pending.length) return;
+  state.npcEnrichPending = true;
+  clearTimeout(npcEnrichTimer);
+  npcEnrichTimer = setTimeout(()=>{
+    if(typeof activeTurn!=="undefined" && activeTurn){
+      state.npcEnrichPending = false;
+      return;
+    }
+    enrichNpcProfiles(state)
+      .catch(()=>{})
+      .finally(()=>{ state.npcEnrichPending = false; });
+  }, 300);
+}
+async function enrichNpcProfiles(state){
+  if(!state || !state.ai || state.ending) return;
+  if(npcEnrichBusy) return;
+  npcEnrichBusy = true;
+  try{
+  const candidates = (state.cast||[]).filter(npcProfileMissing).slice(0,4);
+  if(!candidates.length) return;
+  state.npcEnrichTurn = state.turn || 0;
+  const payload = candidates.map(c=>({
+    name:c.name,gender:c.gender,age:c.age,species:c.species,job:c.job||c.identity,
+    identity:c.identity,personality:c.personality,background:c.background,
+    tie:c.tie,appearance:c.appearance,outfit:c.outfit,voice:c.voice,routine:c.routine
+  }));
+  const sys = `你是人物设定补全助手。根据故事背景与已知人物信息，只补全缺失或空白的字段，已有内容绝不覆盖、不改名、不改变已发生的事实。
+只输出 JSON：{"characters":[{"name":"原名","appearance":"可观察外貌：发型发色、眼睛、肤色、体型、疤痕或非人特征","outfit":"当前衣着与随身装备","voice":"称呼、语气与说话习惯","routine":"日常作息与通常在哪","personality":"性格一句话","background":"已揭示的过去与身份"}]}
+要求：贴合故事的时代、地点、职业、年龄与物种；不同人物要有明显差异，不要所有人同一副脸或同一套衣服；不编造重大秘密，不替玩家做决定。只返回 JSON。`;
+  const user = JSON.stringify({
+    world:state.worldName||state.genre||"", genre:state.genre, scene:state.scene,
+    place:state.environment?.place||"", time:typeof formatStoryTime==="function" ? formatStoryTime(state.environment?.minute,state) : "",
+    characters:payload
+  });
+  let parsed;
+  try{
+    const raw = await callLLM([{role:"system",content:sys},{role:"user",content:user}], AbortSignal.timeout(45000), null, {temperature:0.4});
+    parsed = extractJSON(raw);
+  }catch(e){ return; }
+  const list = Array.isArray(parsed?.characters) ? parsed.characters.filter(x=>x&&x.name) : [];
+  if(!list.length) return;
+  let changed = false;
+  for(const item of list){
+    const c = (state.cast||[]).find(x=>x && x.name===item.name)
+      || (state.cast||[]).find(x=>x && x.name && sameNpcName(x.name,item.name));
+    if(!c || c.dead) continue;
+    for(const key of ["appearance","outfit","voice","routine","personality","background"]){
+      const value = String(item[key]||"").trim();
+      if(value && !String(c[key]||"").trim()){ c[key] = value.slice(0,300); changed = true; }
+    }
+    ensureNpcDefaults(c,state);
+  }
+  if(changed && typeof S!=="undefined" && S===state){
+    try{ refreshSide(); }catch(e){}
+    saveProgress();
+  }
+  }finally{
+    npcEnrichBusy = false;
+  }
+}
 function updateCast(cast, updates, lines){
   const people = new Map(cast.map(c=>[c.name,c]));
-  for(const {name,background,personality,hobby,voice,goal,attitude,change,knows,job,routine,age,gender,species,tie,appearance,origin,outfit,height,weight,combat,hp,dead,wealth,coin,income,incomePlan,savings,assets,birth,rep,moral,wanted,adult,kinks,intimacy,desire,links} of updates){
-    const person = people.get(name) || {name,background:"",goal:"",attitude:"",knows:"",changes:[]};
-    const minor = adult===false || (age!==undefined && age<18);
+  for(const {name,background,personality,hobby,voice,goal,agenda,attitude,change,knows,job,identity,routine,age,gender,species,tie,appearance,origin,outfit,height,weight,combat,attrs,hp,dead,wealth,coin,income,incomePlan,savings,assets,birth,rep,moral,wanted,adult,kinks,intimacy,desire,links,memories,group,transient} of updates){
+    let alias = name;
+    for(const key of people.keys()){ if(key!==name && sameNpcName(key,name)){ alias = key; break; } }
+    const person = people.get(alias) || people.get(name) || {name,background:"",goal:"",attitude:"",knows:"",changes:[]};
+    const finalName = preferNpcName(alias, name);
+    const nextAge = Number.isFinite(Number(age)) && Number(age)>0 ? Math.round(Number(age)) : undefined;
+    const minor = adult===false || (nextAge!==undefined && nextAge<18);
     const prevChanges = Array.isArray(person.changes) ? person.changes : [];
     const changes = change && change!==prevChanges.at(-1)
       ? [...prevChanges,change].slice(-4) : prevChanges;
@@ -2138,13 +2636,20 @@ function updateCast(cast, updates, lines){
       for(const l of links){ if(!l || !l.name) continue; m.set(l.name, {...(m.get(l.name)||{}), ...l}); }
       mergedLinks = [...m.values()].slice(-8);
     }
+    const mergedMemories = Array.isArray(memories)
+      ? [...(person.memories||[]),...memories].filter(m=>m && (m.text||m.event)).slice(-8)
+      : person.memories;
+    people.delete(alias);
     people.delete(name);
-    people.set(name,{
-      ...person, background:background||person.background, goal:goal||person.goal,
+    people.set(finalName,{
+      ...person, name:finalName, background:background||person.background, goal:goal||person.goal,
+      agenda:agenda||person.agenda, group:group===true || person.group===true || isGroupName(finalName),
+      transient:transient===true ? true : (transient===false ? false : person.transient),
       personality:person.personality||personality, hobby:person.hobby||hobby, voice:person.voice||voice,
       attitude:attitude||person.attitude, knows:knows||person.knows||"", changes,
-      job:job||person.job, routine:routine||person.routine,
-      age:age!==undefined ? age : person.age,
+      job:job||person.job, identity:identity||person.identity, routine:routine||person.routine,
+      age:(Number(person.age)>0 && !person.ageInferred) ? person.age : (nextAge!==undefined ? nextAge : (Number(person.age)>0 ? person.age : undefined)),
+      ageInferred:(nextAge!==undefined ? false : person.ageInferred),
       gender:gender||person.gender,
       species:species||person.species,
       tie:tie||person.tie,
@@ -2154,6 +2659,7 @@ function updateCast(cast, updates, lines){
       height:height!==undefined ? height : person.height,
       weight:weight!==undefined ? weight : person.weight,
       combat:combat||person.combat,
+      attrs:normalizeStartAttrs(attrs)||person.attrs,
       hp:hp!==undefined ? hp : person.hp,
       dead:dead===true ? true : person.dead,
       wealth:wealth||person.wealth,
@@ -2162,7 +2668,7 @@ function updateCast(cast, updates, lines){
       incomePlan:incomePlan||person.incomePlan,
       savings:savings!==undefined ? savings : person.savings,
       assets:assets||person.assets,
-      birth:birth||person.birth,
+      birth:person.birth||birth,
       incomeClock:person.incomeClock,
       rep:rep!==undefined ? rep : person.rep,
       moral:moral!==undefined ? moral : person.moral,
@@ -2171,12 +2677,19 @@ function updateCast(cast, updates, lines){
       kinks:minor ? [] : (kinks!==undefined ? kinks : person.kinks),
       intimacy:minor ? 0 : (intimacy!==undefined ? intimacy : person.intimacy),
       desire:minor ? 0 : (desire!==undefined ? desire : person.desire),
-      links:mergedLinks
+      links:mergedLinks,
+      memories:mergedMemories
     });
   }
   for(const line of lines){
-    const person = people.get(line.who);
-    if(line.t==="npc-action" && person) people.set(line.who,{...person,lastAction:line.text});
+    if(!line || !line.who) continue;
+    let key = line.who;
+    if(!people.has(key)){
+      const match = [...people.keys()].find(name=>sameNpcName(name,line.who));
+      if(match) key = match;
+    }
+    const person = people.get(key);
+    if(line.t==="npc-action" && person) people.set(key,{...person,lastAction:line.text});
   }
   return [...people.values()];
 }
@@ -2199,6 +2712,16 @@ function applyEffect(state,e,calculatedStamina=false){
   if(Number.isFinite(e.wanted)) state.wanted = clamp((state.wanted||0) + e.wanted, 0, 100);
   if(Number.isFinite(e.stealth)) state.concealment = clamp((state.concealment||0) + e.stealth, 0, 100);
   if(Number.isFinite(e.health)) state.health = clamp((state.health??100) + e.health, 0, 100);
+  if(e.attrs && typeof e.attrs==="object"){
+    for(const key of ["iq","physique","charm","willpower","agility"]){
+      const delta = e.attrs[key];
+      if(Number.isFinite(delta) && delta) state[key] = clamp((state[key]??50) + delta, 0, 100);
+    }
+    if(Number.isFinite(e.attrs.physique) && e.attrs.physique){
+      state.hpMax = clamp(Math.round(80 + (state.physique??50)*0.4), 40, 140);
+      state.hp = clamp(state.hp??state.hpMax, 0, state.hpMax);
+    }
+  }
   if(state.combat){
     if(Number.isFinite(e.qi)) state.combat.energy = clamp((state.combat.energy||0) + e.qi, 0, state.combat.energyMax||100);
     if(Number.isFinite(e.combatPower)) state.combat.power = clamp((state.combat.power||0) + e.combatPower, 0, 200);
@@ -2477,7 +3000,7 @@ function clearIdleTimer(){
 }
 
 function stopStoryForIdle(){
-  if(!S || !S.ai || S.ending) return;
+  if(!S || !S.ai || S.ending || !idleAutoEnabled()) return;
   clearIdleTimer();
   S.ending = {
     good:false,
@@ -2491,7 +3014,7 @@ function stopStoryForIdle(){
 
 function armIdleTimer(){
   clearIdleTimer();
-  if(!S.ai || S.ending) return;
+  if(!S.ai || S.ending || !idleAutoEnabled()) return;
   if((S.idleCount||0)>=2){
     stopStoryForIdle();
     return;
@@ -2537,8 +3060,11 @@ function showCurrentScene(draft){
   showSpeechInput(draft);
   const waitForDawn = isTwoDayTrial(S) && S.environment.minute<1440
     ? [{text:"在当前地点等到次日 06:30",tradeoff:"会错过今晚剩下的机会",waitUntil:1830}] : [];
+  const REST_TEXT = "先停下来休息一会儿，喝水、坐下或找地方睡一觉，恢复体力";
+  const autoRest = S.hp<=25 ? {text:REST_TEXT,tradeoff:"会耽误时间，但总比硬撑好"} : null;
+  S.choices = (S.choices||[]).filter(c=>c && c.text!==REST_TEXT);
+  if(autoRest) S.choices = [autoRest,...S.choices];
   const choices = [
-    ...(S.hp<=0 ? [{text:"停下来喘口气，看看能否休息或求助"}] : []),
     ...S.choices,
     ...(S.offers||[]).map(o=>({text:(o.kind==="barter"?"交换":o.kind==="insurance"?"投保":o.kind==="deposit"?"办理定期":o.kind==="rent"?"签订租约":"购买")+"「"+o.item+"」",
       tradeoff:o.seller+" · "+economicQuote(S,o)+(o.reason?" · "+o.reason:""),offerId:o.id,
@@ -2703,6 +3229,33 @@ function validateSceneForTurn(scene, state){
   }
   if(!scene.ending && !scene.choices.some(c=>!isGenericChoice(c.text))){
     return "请给出至少两条根据本幕人物、线索和当前限制能够尝试的选项，各写取舍；不要只写「继续」。";
+  }
+  return validateSceneConsistency(scene,state);
+}
+
+function validateSceneConsistency(scene,state){
+  if(!scene || scene.prose || !state) return null;
+  const dead = deadCharacterNames(state);
+  const deadLine = (scene.lines||[]).find(l=>l && l.who && dead.has(l.who));
+  if(deadLine) return "「"+deadLine.who+"」已经死亡，不能在本幕说话或行动；请改用在世人物、旁白或明确的回忆。";
+  const deadChar = (scene.characters||[]).find(ch=>ch && ch.name && dead.has(ch.name));
+  if(deadChar) return "「"+deadChar.name+"」已经死亡，不能再更新其档案或让其出场。";
+  const present = new Set([...(state.present||[]),...(scene.entered||[])]);
+  const known = new Set((state.cast||[]).map(c=>c && c.name).filter(Boolean));
+  if(present.size){
+    const absentSay = (scene.lines||[]).find(l=>l && l.t==="say" && l.who && known.has(l.who)
+      && !present.has(l.who) && !(scene.left||[]).includes(l.who));
+    if(absentSay) return "「"+absentSay.who+"」本幕不在场，却直接说话了。若要让 TA 发言，先用 entered 让其进场，或改成旁白/传话。";
+  }
+  if(!scene.environment?.longSkip){
+    for(const ch of (scene.characters||[])){
+      if(!ch || !ch.name || !Number.isFinite(Number(ch.age))) continue;
+      const c = (state.cast||[]).find(x=>x && x.name && (x.name===ch.name || sameNpcName(x.name,ch.name)));
+      if(!c || c.ageInferred || !Number.isFinite(Number(c.age))) continue;
+      if(Math.abs(Number(c.age)-Number(ch.age))>2){
+        return "「"+ch.name+"」的年龄（"+ch.age+"）与已有档案（"+c.age+"）冲突。除非发生时间跳跃，否则请沿用原年龄。";
+      }
+    }
   }
   return null;
 }

@@ -22,8 +22,8 @@
       <button class="icon-btn" id="btn-sound" aria-label="氛围音效" aria-pressed="false" title="氛围音效">🔇</button>
       <button class="icon-btn" id="btn-side" aria-label="故事侧栏" aria-controls="story-side" title="故事侧栏">☰</button>
       <button class="icon-btn" id="btn-undo" aria-label="撤销上一步剧情" title="没有可撤销的剧情" disabled>↶</button>
-      <button class="icon-btn" id="btn-scene-img" aria-label="自动配图开关" aria-pressed="false" title="点一下开启自动配图：每个剧情点生成一张">🖼</button>
-      <button class="icon-btn" id="btn-menu" aria-label="酒馆首页" title="酒馆首页">⟲</button>
+      <button class="icon-btn" id="btn-scene-img" aria-label="生成当前场景配图" title="为当前剧情点生成一张配图（按一次生一次）">🖼</button>
+      <button class="icon-btn" id="btn-menu" aria-label="返回酒馆首页" title="返回酒馆首页">🏠</button>
     </div>
   </div>
   <div class="world-status" id="world-status" aria-label="故事时间、地点与天气" hidden></div>
@@ -34,13 +34,10 @@
     <div class="side" id="story-side">
       <div class="side-tabs">
         <button class="side-tab active" data-tab="char">人物</button>
+        <button class="side-tab" data-tab="story">篇章</button>
         <button class="side-tab" data-tab="quest">任务</button>
         <button class="side-tab" data-tab="items">物品</button>
         <button type="button" class="icon-btn side-close" id="side-close" aria-label="关闭故事侧栏">×</button>
-      </div>
-      <div class="side-provider">
-        <label for="llm-provider">AI 引擎</label>
-        <select id="llm-provider" hidden></select>
       </div>
       <div class="side-body" id="side-body"></div>
     </div>
@@ -73,6 +70,7 @@
 <script src="worlds-index.js"></script>
 <script src="avatars/avatars.js"></script>
 <script src="js/data.js"></script>
+<script src="js/db.js"></script>
 <script src="js/engine.js"></script>
 <script src="js/turn.js"></script>
 <script src="js/game.js"></script>

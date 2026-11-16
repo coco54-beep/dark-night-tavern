@@ -426,11 +426,18 @@ function worldRoutes(req, res, user, url, route) {
       if (typeof p.worldStart==="string" && p.worldStart) world.worldStart=p.worldStart.slice(0,600);
       if (p.role && typeof p.role.name==="string" && p.role.name.trim()){
         const role={};
-        for(const key of ["name","gender","identity","personality","hook","species"]){
+        for(const key of ["name","gender","identity","personality","hook","species","origin","appearance","outfit"]){
           if(typeof p.role[key]==="string") role[key]=p.role[key].slice(0,300);
         }
         for(const key of ["coin","income","age","height","weight"]){
           if(Number.isFinite(p.role[key])) role[key]=Math.max(0,Math.round(p.role[key]));
+        }
+        if (p.role.attrs && typeof p.role.attrs==="object" && !Array.isArray(p.role.attrs)){
+          const attrs={};
+          for(const key of ["iq","physique","charm","willpower","agility"]){
+            if(Number.isFinite(p.role.attrs[key])) attrs[key]=Math.max(10,Math.min(90,Math.round(p.role.attrs[key])));
+          }
+          if(Object.keys(attrs).length===5) role.attrs=attrs;
         }
         world.role=role;
       }
@@ -461,6 +468,21 @@ function worldRoutes(req, res, user, url, route) {
       world.savedAt = Date.now();
       writeJSON(worldsFile, worlds);
       sendJSON(res, 200, { world });
+    });
+  }
+  if (route === "/api/worlds/delete-book" && req.method === "POST") {
+    return readBody(req, res, ({ id }) => {
+      if (!validId(id)) return sendJSON(res, 400, { error: "无效的书目编号" });
+      const worlds = readJSON(worldsFile, []);
+      const target = worlds.find(w => w.id === id);
+      if (!target || !target.isBook) return sendJSON(res, 400, { error: "这不是书库中的小说剧本" });
+      const ids = new Set([id, ...worlds.filter(w => w.bookId === id).map(w => w.id)]);
+      writeJSON(worldsFile, worlds.filter(w => !ids.has(w.id)));
+      for (const wid of ids) {
+        try { fs.unlinkSync(userFile(user, "save_" + wid + ".json")); }
+        catch (err) { if (err.code !== "ENOENT") throw err; }
+      }
+      sendJSON(res, 200, { ok: true, deleted: [...ids] });
     });
   }
   if (route === "/api/worlds/delete" && req.method === "POST") {
@@ -512,6 +534,10 @@ function serveStatic(req, res, route) {
   const type = target === "/index.html" ? "text/html" : target === "/worlds-index.js" ? "application/javascript" :
     target === "/styles.css" ? "text/css" :
     /^\/js\/[a-z0-9_-]+\.js$/i.test(target) ? "application/javascript" :
+    /^\/vendor\/[a-z0-9._-]+\.js$/i.test(target) ? "application/javascript" :
+    /^\/vendor\/[a-z0-9._-]+\.wasm$/i.test(target) ? "application/wasm" :
+    /^\/models\/[a-z0-9._/-]+\.(?:json|txt)$/i.test(target) ? "application/json" :
+    /^\/models\/[a-z0-9._/-]+\.onnx$/i.test(target) ? "application/octet-stream" :
     target === "/avatars/avatars.js" ? "application/javascript" :
     /^\/avatars\/[a-z0-9_]+\.(?:jpe?g|png|webp)$/i.test(target)
       ? "image/"+(/\.jpe?g$/i.test(target) ? "jpeg" : path.extname(target).slice(1)) :
@@ -521,8 +547,9 @@ function serveStatic(req, res, route) {
   if (!type) { res.writeHead(404); return res.end("Not Found"); }
   fs.readFile(path.join(ROOT, target), (err, data) => {
     if (err) { res.writeHead(404); return res.end("Not Found"); }
+    const textual = !/\.(?:wasm|onnx)$/i.test(target);
     const headers = {
-      "Content-Type": type + "; charset=utf-8",
+      "Content-Type": type + (textual ? "; charset=utf-8" : ""),
       "Cache-Control": "no-cache",
       "Vary": "Accept-Encoding",
       "X-Content-Type-Options": "nosniff"

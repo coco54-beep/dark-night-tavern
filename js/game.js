@@ -1,4 +1,4 @@
-"use strict";
+﻿"use strict";
 /* ==================== 引擎 ==================== */
 function goNode(id){
   S.node = id;
@@ -161,7 +161,7 @@ function imageCfg(){
   const def = {enabled:false, base: native ? "http://onlyforcoco.myqnapcloud.com:8189" : "http://127.0.0.1:8189",
     user:"", pass:"", checkpoint:"RealVisXL_V5.0_Lightning_fp16.safetensors",
     style:"photorealistic, cinematic soft light, natural skin texture, high detail, dark background",
-    localPrompt:true, autoAvatars:false, autoScenes:false};
+    autoAvatars:false, autoScenes:false};
   try{ return {...def, ...JSON.parse(localStorage.getItem(IMAGE_CFG_KEY)||"{}")}; }catch(e){ return def; }
 }
 function saveImageCfg(cfg){ try{ localStorage.setItem(IMAGE_CFG_KEY, JSON.stringify(cfg)); }catch(e){} }
@@ -388,7 +388,7 @@ async function generateSceneImage({signal=null}={}){
   const moment = sceneMoment();
   const sig = seedOf(JSON.stringify({turn:S.turn,scene:S.scene,plot:S.plot,moment:moment.moment.slice(-700),place:moment.place}));
   const key = "scene:"+(S.worldId||"local")+":"+(S.turn||0)+":"+sig;
-  const prompt = cfg.localPrompt !== false ? sceneImagePrompt() : await visualPrompt(null,"scene");
+  const prompt = await visualPrompt(null,"scene");
   if(signal && signal.aborted) throw aborted();
   const data = await comfyGenerate(prompt,{w:1216,h:832,seed:seedOf(key),signal});
   if(signal && signal.aborted) throw aborted();
@@ -403,45 +403,6 @@ async function generateSceneImage({signal=null}={}){
   await saveProgress(true);
   return key;
 }
-function syncSceneImageButton(){
-  const btn = $("btn-scene-img");
-  if(!btn) return;
-  const on = !!(S.sceneImageAuto && imageCfg().enabled);
-  btn.classList.toggle("active",on);
-  btn.setAttribute("aria-pressed",on ? "true" : "false");
-  btn.title = on ? "自动配图已开启：每个剧情点生成一张（点击关闭）" : "点一下开启自动配图：每个剧情点生成一张";
-}
-async function autoSceneImage(){
-  if(!S || !S.ai || !S.sceneImageAuto || !imageCfg().enabled) return;
-  if(!S.scene && !(S.environment && S.environment.place)) return;
-  if(Number(S.turn) === Number(S.lastAutoSceneTurn)) return;
-  if(autoImageAbort) autoImageAbort.abort();
-  const controller = new AbortController();
-  autoImageAbort = controller;
-  S.lastAutoSceneTurn = S.turn;
-  try{
-    await generateSceneImage({signal:controller.signal});
-    if(controller.signal.aborted || !S.sceneImageAuto) return;
-    S.autoImageTimeouts = 0;
-    imageToast("已自动生成当前剧情配图。",2500);
-  }catch(e){
-    if(e.name === "AbortError" || controller.signal.aborted || !S.sceneImageAuto) return;
-    const timedOut = e.name === "TimeoutError" || /超时|timeout|timed out/i.test(e.message || "");
-    if(timedOut) S.autoImageTimeouts = (S.autoImageTimeouts || 0) + 1;
-    else S.autoImageTimeouts = 0;
-    if(S.autoImageTimeouts >= 2){
-      S.sceneImageAuto = false;
-      S.autoImageTimeouts = 0;
-      syncSceneImageButton();
-      imageToast("连续两次配图超时，已自动关闭自动配图。",7000);
-      saveProgress();
-      return;
-    }
-    imageToast(timedOut ? ("自动配图超时 "+S.autoImageTimeouts+"/2："+e.message) : ("自动配图失败："+e.message),6000);
-  }finally{
-    if(autoImageAbort === controller) autoImageAbort = null;
-  }
-}
 let imageToastTimer = null;
 function imageToast(message,ms=3500){
   let el = document.getElementById("img-toast");
@@ -452,15 +413,14 @@ function imageToast(message,ms=3500){
   if(ms>0) imageToastTimer = setTimeout(()=>{ el.hidden = true; },ms);
 }
 
-function showImageSettings(){
+function showImageSettings(back = showTitle){
   const cfg = imageCfg();
   const card = $("card");
   card.innerHTML = `
     <h1>图像设置</h1>
-    <div class="sub">用本地 ComfyUI 生成 NPC 头像和场景配图。启用后，故事中点一下右上角 🖼 开启自动配图，每个剧情点会生成一张并插入聊天记录；再点一下关闭。手机 APK 请把地址改成电脑的局域网 IP 或公网地址，并填写代理账号密码。</div>
+    <div class="sub">用本地 ComfyUI 生成 NPC 头像和场景配图。启用后，故事中点右上角 🖼 会为当前剧情点生成一张配图并插入聊天记录；按一次生一次。手机 APK 请把地址改成电脑的局域网 IP 或公网地址，并填写代理账号密码。</div>
     <form class="auth-form" id="image-form" autocomplete="off">
       <label class="check-line"><input type="checkbox" id="image-enabled" ${cfg.enabled?"checked":""}> 启用图像生成</label>
-      <label class="check-line"><input type="checkbox" id="image-local-prompt" ${cfg.localPrompt!==false?"checked":""}> 本地快速提示词（自动配图不调用 LLM，速度更快）</label>
       <label for="image-base">ComfyUI 地址</label>
       <input id="image-base" type="url" maxlength="512" value="${escapeHtml(cfg.base||"")}" placeholder="http://127.0.0.1:8189" required>
       <label for="image-user">用户名</label>
@@ -478,7 +438,8 @@ function showImageSettings(){
     </form>`;
   const status = $("image-status");
   const baseEl = $("image-base"), userEl = $("image-user"), passEl = $("image-pass");
-  $("image-back").onclick = showTitle;
+  $("image-back").onclick = back;
+  if(back!==showTitle) $("image-back").textContent = "返回设置";
   $("image-test").onclick = async ()=>{
     status.textContent = "测试中……";
     const base = baseEl.value.trim().replace(/\/+$/,"");
@@ -495,7 +456,6 @@ function showImageSettings(){
     e.preventDefault();
     const next = {...cfg,
       enabled: $("image-enabled").checked,
-      localPrompt: !!($("image-local-prompt") && $("image-local-prompt").checked),
       base: baseEl.value.trim(),
       user: userEl.value.trim(),
       pass: passEl.value || cfg.pass,
@@ -504,8 +464,72 @@ function showImageSettings(){
     };
     saveImageCfg(next);
     status.textContent = "已保存。";
-    setTimeout(showTitle, 400);
+    setTimeout(back, 400);
   };
+}
+
+function showSettings(){
+  const card = $("card");
+  card.innerHTML = `
+    <div class="home">
+      <header class="home-header"><h1>设置</h1></header>
+      <div class="settings-list">
+        <button class="big-btn ghost" id="settings-ai">我的 AI 设置<small>API 地址、模型与密钥</small></button>
+        <button class="big-btn ghost" id="settings-image">图像设置<small>ComfyUI 地址与生图开关</small></button>
+      </div>
+      <label class="check-line"><input type="checkbox" id="settings-idle-auto" ${idleAutoEnabled()?"checked":""}> 90 秒无操作自动推进剧情（关闭后不会超时结束）</label>
+      <label class="check-line"><input type="checkbox" id="settings-story-full" ${storyDetailFull()?"checked":""}> 每幕使用完整叙事规则（更细，切换后下一幕生效）</label>
+      <label class="check-line"><input type="checkbox" id="settings-semantic" ${semanticMemoryEnabled()?"checked":""}> 本地语义记忆（首次开启需加载模型，会稍慢）</label>
+      <label class="check-line"><input type="checkbox" id="settings-memory-first" ${memoryFirstEnabled()?"checked":""}> 记忆优先模式（缩短历史上下文，主要依赖数据库召回）</label>
+      <p class="form-note" id="settings-note" role="status"></p>
+      <div class="card-btns">
+        <button class="big-btn" id="settings-back">返回酒馆</button>
+      </div>
+    </div>`;
+  $("settings-ai").onclick = ()=>showPersonalAI(showSettings);
+  $("settings-image").onclick = ()=>showImageSettings(showSettings);
+  $("settings-idle-auto").onchange = e=>{
+    setIdleAutoEnabled(e.target.checked);
+    if(!e.target.checked) clearIdleTimer();
+    $("settings-note").textContent = e.target.checked
+      ? "已开启：90 秒无操作会自动推进剧情。"
+      : "已关闭：不再自动推进，也不会因沉默超时结束。";
+  };
+  $("settings-story-full").onchange = e=>{
+    setStoryDetailFull(e.target.checked);
+    $("settings-note").textContent = e.target.checked
+      ? "已开启完整叙事规则：人物、判定与细节更完整，生成会稍慢、消耗更多 token。"
+      : "已使用精简规则：更快、更省 token；关键判定、交易和期限仍会自动切回完整规则。";
+  };
+  $("settings-semantic").onchange = async e=>{
+    setSemanticMemory(e.target.checked);
+    if(!e.target.checked){
+      $("settings-note").textContent = "已关闭本地语义记忆：仍使用人物、关键词和重要性检索。";
+      return;
+    }
+    $("settings-note").textContent = "正在加载本地语义模型，首次可能需要几秒……";
+    const ok = await warmSemanticMemory();
+    if(!ok){
+      $("settings-note").textContent = "本地语义模型加载失败，已保留关键词检索。";
+      return;
+    }
+    $("settings-note").textContent = "语义模型已就绪，正在为旧事件补向量……";
+    if(typeof S!=="undefined" && S && typeof tavernWorldId==="function"){
+      const n = await backfillEmbeddings(tavernWorldId(S));
+      $("settings-note").textContent = n
+        ? "语义记忆已开启，已补充 "+n+" 条旧事件。"
+        : "语义记忆已开启；新发生的剧情会自动建立语义索引。";
+    }else{
+      $("settings-note").textContent = "语义记忆已开启。";
+    }
+  };
+  $("settings-memory-first").onchange = e=>{
+    setMemoryFirst(e.target.checked);
+    $("settings-note").textContent = e.target.checked
+      ? "已开启记忆优先：历史对话更短，更多依赖数据库检索，生成通常更快，但细节依赖记忆质量。"
+      : "已关闭记忆优先：保留更长的最近对话，上下文更完整。";
+  };
+  $("settings-back").onclick = showTitle;
 }
 
 async function showTitle(){
@@ -552,6 +576,7 @@ async function showTitle(){
         <span class="b-author">${w.source==="paste"?"我粘贴的":"我导入的"} · 选起点进入剧本</span>
       </button>
       <button class="builtin-ren" data-id="${escapeHtml(w.id)}" data-name="${escapeHtml(w.name)}" aria-label="重命名 ${escapeHtml(w.name)}">✎</button>
+      <button class="builtin-del book-del" data-id="${escapeHtml(w.id)}" data-title="${escapeHtml(w.name)}" aria-label="删除 ${escapeHtml(w.name)}">✕</button>
     </div>`).join("");
   const library = isLoggedIn() && (builtins.length || userBooks.length) ? `
     <details class="library">
@@ -605,7 +630,7 @@ async function showTitle(){
       <header class="home-header">
         <h1>暗夜酒馆</h1>
         ${isLoggedIn()
-          ? '<div class="home-tools home-tools-top"><button class="logout-btn" id="btn-personal-ai">我的 AI 设置</button><button class="logout-btn" id="btn-image-settings">图像设置</button>'+(isSingleMode()?'':'<button class="logout-btn" id="btn-logout">退出登录</button>')+'</div>'
+          ? '<div class="home-tools home-tools-top"><button class="logout-btn" id="btn-settings">设置</button></div>'
           : '<div class="home-account"><button class="logout-btn" id="btn-login">登录酒馆</button></div>'}
       </header>
       <p class="form-note menu-note" id="menu-note" role="status"></p>
@@ -648,41 +673,33 @@ async function showTitle(){
       }
     }finally{ busy = false; }
   }
-  if($("btn-logout")) $("btn-logout").onclick = async ()=>{
-    clearAuth(); S = DEFAULT_STATE();
-    showTitle();
-    try{ await saveQueue; await api("/api/logout",{method:"POST",token:owner}); }catch(e){}
-  };
+  $("btn-settings").onclick = showSettings;
   if($("btn-return")) $("btn-return").onclick = ()=>enterStory();
   if($("btn-continue")) $("btn-continue").onclick = ()=>menuAction(()=>loadWorld(latest.id,stillHere));
   $("btn-ai").onclick = ()=>showGenreSelect();
-  $("btn-personal-ai").onclick = showPersonalAI;
-$("btn-image-settings").onclick = showImageSettings;
 $("btn-scene-img").onclick = async ()=>{
   const btn = $("btn-scene-img");
+  if(btn.disabled) return;
   const cfg = imageCfg();
   if(!cfg.enabled){
     showImageSettings();
-    imageToast("先在这里启用图像生成、填写 ComfyUI 地址和账号，保存后回到故事点 🖼。开启后每个剧情点会自动生成配图。",7000);
+    imageToast("先在这里启用图像生成、填写 ComfyUI 地址和账号，保存后回到故事点 🖼，它会为当前剧情点生成一张配图。",7000);
     return;
   }
   if(!S || (!S.scene && !S.environment?.place)){
-    imageToast("先进入故事；🖼 开启后会自动为每个剧情点生成配图并插入聊天记录。");
+    imageToast("先进入故事；🖼 会为当前剧情点生成一张配图并插入聊天记录。");
     return;
   }
-  S.sceneImageAuto = !S.sceneImageAuto;
-  if(S.sceneImageAuto){
-    S.autoImageTimeouts = 0;
-    S.lastAutoSceneTurn = -1;
-  }else if(autoImageAbort){ autoImageAbort.abort(); autoImageAbort = null; }
-  syncSceneImageButton();
-  if(S.sceneImageAuto){
-    imageToast("已开启自动配图：之后每个剧情点都会自动生成。",4500);
-    autoSceneImage();
-  }else{
-    imageToast("已关闭自动配图。",2500);
+  btn.disabled = true; btn.textContent = "…";
+  imageToast("正在生成当前场景图，请稍等……",0);
+  try{
+    await generateSceneImage();
+    imageToast("场景图已生成，已插入聊天记录。",3000);
+  }catch(e){
+    imageToast("生成失败："+e.message,7000);
+  }finally{
+    btn.disabled = false; btn.textContent = "🖼";
   }
-  saveProgress();
 };
   $("btn-import").onclick = ()=>$("file-input").click();
   $("file-input").onchange = e=>{
@@ -709,6 +726,7 @@ $("btn-scene-img").onclick = async ()=>{
       menuAction(async ()=>{
         await saveQueue;
         await api("/api/worlds/delete",{method:"POST",body:{id:btn.dataset.id},token:owner});
+        if(typeof dbDeleteWorld==="function") dbDeleteWorld(btn.dataset.id).catch(()=>{});
         if(!stillHere()) return;
         if(S.worldId===btn.dataset.id) S = DEFAULT_STATE();
         showTitle();
@@ -734,6 +752,16 @@ $("btn-scene-img").onclick = async ()=>{
     btn.onclick = (e)=>{
       e.stopPropagation();
       const title = btn.dataset.title || "这本书";
+      if(btn.classList.contains("book-del")){
+        if(!confirm("彻底删除小说剧本《"+title+"》？\n与它关联的旅途和存档也会删除，原文无法恢复。")) return;
+        menuAction(async ()=>{
+          await api("/api/worlds/delete-book",{method:"POST",body:{id:btn.dataset.id},token:owner});
+          if(!stillHere()) return;
+          if(S.bookId===btn.dataset.id) S = DEFAULT_STATE();
+          showTitle();
+        },"正在删除书目……");
+        return;
+      }
       if(!confirm("从书库移除《"+title+"》？\n已创建的旅途存档不会删除。")) return;
       hideBook(btn.dataset.id);
       showTitle();
@@ -841,6 +869,9 @@ function genreConflictLine(state){
 }
 function genreMoralityLine(state){
   if(isRomanceMode(state)){
+    if(relationshipModeOf(state)==="open"){
+      return "【道德基线】人是复杂的，不要把所有 NPC 写成道德圣人。恋爱类型里的道德更多体现在诚实、边界、知情同意与承担，而不是身体忠诚或排他；开放关系不是道德缺陷。角色可以有自私、旧错、犹豫或灰色过去，也可以坦率地只想要身体关系。";
+    }
     return "【道德基线】人是复杂的，不要把所有 NPC 写成道德圣人。恋爱类型里的道德更多体现在忠诚、边界、诚实与承担，而不是一律善良；角色可以有自私、占有欲、旧错或灰色过去。";
   }
   const genre = state.genre || "";
@@ -999,8 +1030,8 @@ function storyBeatPrompt(state, stageMinutes){
     +p.avoid+"事件要接在已发生的人物、地点和选择上，能改变玩家眼前的目标或关系。";
 }
 function storyCalmPrompt(state){
-  return "无限模式：当前不在剧情节拍上。让时间自然流动，写人物各自的日常、关系余温、环境细节或玩家自己的打算；"
-    +"不要为了热闹硬塞新麻烦、房租、账单、流言、催婚、陌生人求助或鸡毛蒜皮的意外。只有玩家主动行动、主动寻找冲突，或时间到达下一个 4~6 小时节拍时，才引入新的实质事件。";
+  return "无限模式：当前不在剧情节拍上。让时间自然流动，写关系余温、环境细节、人物的闲谈或玩家自己的打算；不要把日常写成打工、采购、算账清单；"
+    +"不要为了热闹硬塞新麻烦、工作、跑腿、房租、账单、流言、催婚、陌生人求助或鸡毛蒜皮的意外。只有玩家主动行动、主动寻找冲突，或时间到达下一个 4~6 小时节拍时，才引入新的实质事件。";
 }
 function ensureCurrency(state){
   if(state.currency && state.currency.name) return state.currency;
@@ -1086,6 +1117,7 @@ async function showEnterSelect(full, stillHere){
       <select id="enter-chapter" style="display:none;width:100%;min-height:44px;margin-top:6px;background:#1a130c;color:var(--text);border:1px solid var(--border);border-radius:8px;font:inherit">
         ${chapters.map((c,i)=>`<option value="${i}">${escapeHtml(c.title)}</option>`).join("")}
       </select>` : ""}
+      <div class="enter-preview" id="enter-preview"></div>
     </div>
     <label for="enter-genre" style="display:block;margin-top:8px;font-size:14px;color:var(--gold2)">故事类型</label>
     <select id="enter-genre" style="width:100%;min-height:44px;margin-top:6px;background:#1a130c;color:var(--text);border:1px solid var(--border);border-radius:8px;font:inherit">
@@ -1098,7 +1130,7 @@ async function showEnterSelect(full, stillHere){
       <button class="big-btn" id="btn-enter-next">选择角色并开始</button>
       <button class="big-btn ghost" id="btn-back">返回书架</button>
     </div>`;
-  const range = $("enter-range"), label = $("enter-pct-label");
+  const range = $("enter-range"), label = $("enter-pct-label"), preview = $("enter-preview");
   const byChapter = $("enter-by-chapter"), chapterSel = $("enter-chapter");
   const status = $("enter-status");
   const genreSel = $("enter-genre");
@@ -1109,14 +1141,29 @@ async function showEnterSelect(full, stillHere){
   const position = ()=> useChapter()
     ? (chapters[Number(chapterSel.value)]?.offset || 0)
     : Math.floor(text.length * Number(range.value) / 100);
+  function renderPreview(){
+    if(!preview) return;
+    const cut = Math.max(0, Math.min(text.length, position()));
+    if(!text){
+      preview.textContent = "原文为空，无法预览。";
+      return;
+    }
+    const start = Math.max(0, cut-55);
+    const end = Math.min(text.length, cut+130);
+    const before = text.slice(start, cut).replace(/\s+/g," ").trim();
+    const after = text.slice(cut, end).replace(/\s+/g," ").trim();
+    preview.textContent = (before ? "……"+before+" " : "") + "【从这里开始】" + after + (end<text.length ? "……" : "");
+  }
   function updatePreview(){
     if(useChapter()){
       const c = chapters[Number(chapterSel.value)] || chapters[0];
       if(label) label.textContent = c ? c.title : "按章回";
+      renderPreview();
       return;
     }
     const pct = Number(range.value);
     if(label) label.textContent = pct===0 ? "从头开始" : "选段的 "+pct+"%";
+    renderPreview();
   }
   function syncMode(){
     const on = useChapter();
@@ -1149,6 +1196,31 @@ async function showEnterSelect(full, stillHere){
   $("btn-back").onclick = showTitle;
 }
 
+async function enrichRoleCards(full, roles, context, signal){
+  const missing = roles.some(r=>!Number.isFinite(Number(r.age)) || !String(r.appearance||"").trim());
+  if(!missing) return roles;
+  const sys = `你是人物设定助手。根据给出的角色姓名、身份、性格和原文片段，补全缺失的年龄、外貌、衣着、身高、体重。只输出 JSON：{"roles":[{"name":"原名","age":30,"appearance":"发型发色、眼睛、肤色、体型、疤痕或非人特征","outfit":"衣着与装备","height":170,"weight":65}]}。不得改名、改性别或改身份；原文没有明确时按时代、职业、处境合理推断，不要所有角色同岁或同一副外貌。`;
+  try{
+    const content = await callLLM([
+      {role:"system",content:sys},
+      {role:"user",content:JSON.stringify({roles,excerpt:String(context||"").slice(-6000)})}
+    ], signal, null, {temperature:0.35});
+    const parsed = extractJSON(content);
+    const map = new Map((Array.isArray(parsed?.roles)?parsed.roles:[]).filter(r=>r&&r.name).map(r=>[r.name,r]));
+    return roles.map(r=>{
+      const e = map.get(r.name) || {};
+      return {
+        ...r,
+        age:Number.isFinite(Number(r.age))&&Number(r.age)>0 ? r.age : (Number.isFinite(Number(e.age))&&Number(e.age)>0 ? Math.round(Number(e.age)) : r.age),
+        appearance:String(r.appearance||"").trim() || String(e.appearance||"").slice(0,300),
+        outfit:String(r.outfit||"").trim() || String(e.outfit||"").slice(0,200),
+        height:r.height || (Number.isFinite(Number(e.height)) ? Math.round(Number(e.height)) : undefined),
+        weight:r.weight || (Number.isFinite(Number(e.weight)) ? Math.round(Number(e.weight)) : undefined)
+      };
+    });
+  }catch(e){ return roles; }
+}
+
 /* 根据前文让 AI 生成可扮演的角色卡 */
 async function showRoleCards(full, beforeText, stillHere, statusEl, opts = {}){
   const card = $("card");
@@ -1157,7 +1229,7 @@ async function showRoleCards(full, beforeText, stillHere, statusEl, opts = {}){
   const context = before ? before.slice(-18000) : (full.text||"").slice(0,18000);
   const entryContext = opts.entryTitle
     ? "\n选择的起点："+opts.entryTitle+"。只按起点附近的正文选角，不提前引入后文人物。\n"
-      +full.text.slice(Number(opts.windowStart)||0,(Number(opts.windowStart)||0)+6000)
+      +full.text.slice(Number(opts.windowStart)||0,(Number(opts.windowStart)||0)+1200)
     : "";
   card.innerHTML = `
     <h1>${escapeHtml(full.title||full.name)}</h1>
@@ -1171,29 +1243,36 @@ async function showRoleCards(full, beforeText, stillHere, statusEl, opts = {}){
   const signal = new AbortController();
   $("btn-back").onclick = ()=>{ signal.abort(); showTitle(); };
   const sys = `你是文字冒险游戏的角色设计助手。玩家将根据下面这段原著前文，选择一个角色来扮演并进入故事。请只返回 JSON，不要任何多余文字，格式：
-{"roles":[{"name":"角色姓名（原著真实人物）","gender":"男/女（按原著判断）","species":"人类/动物/外星人/妖怪/机械等","age":年龄整数,"height":身高cm整数,"weight":体重kg整数,"appearance":"发型发色、眼睛、肤色、体型、疤痕/义肢/非人特征","outfit":"当前衣着与随身装备","identity":"身份与处境（一句话）","personality":"性格与语气特点（一句话）","hook":"以该角色进入时的开场切入点（一句话，紧接前文结尾）","income":每日收入（整数，按原著时代与身份）,"coin":初始资金（整数，按原著时代与身份）}]}
+{"roles":[{"name":"角色姓名（原著真实人物）","gender":"男/女（按原著判断）","species":"人类/动物/外星人/妖怪/机械等","age":年龄整数,"height":身高cm整数,"weight":体重kg整数,"appearance":"发型发色、眼睛、肤色、体型、疤痕/义肢/非人特征","outfit":"当前衣着与随身装备","identity":"身份与处境（一句话）","personality":"性格与语气特点（一句话）","hook":"以该角色进入时的开场切入点（一句话，紧接前文结尾）","attrs":{"iq":50,"physique":50,"charm":50,"willpower":50,"agility":50},"income":每日收入（整数，按原著时代与身份）,"coin":初始资金（整数，按原著时代与身份）}]}
 要求：
 - 给出 3 到 6 个可以扮演的角色，优先选原著中在前文里已登场、有分量、能推动故事的人物。
 - 姓名必须来自原著，不得编造原著没有的核心人物，不得改名。
 - gender 必须按原著判断（男/女），不得弄错。
 - income（每日收入）与 coin（初始资金）要按原著的时代、身份与家境给合理数值，不同角色差别明显。
-- age、height、weight、appearance、outfit 要按原著人物与时代判断；原文没明说时合理推断，但不要默认 28 岁，也不要把所有角色写成同一副外貌和身材。
+- age、height、weight、appearance、outfit 要按原著人物与时代判断；原文没明说时合理推断，但不要默认 28 岁，也不要把所有角色写成同一副外貌和身材；年龄未知就省略，不要写 0 岁。
+- attrs 是五项初始属性（0~100 绝对值）：iq 智商、physique 体质、charm 魅力、willpower 意志、agility 敏捷。按原著人物的身体、头脑、性情给不同数值，禁止所有人都写 50；文弱书生体质可 25~40，武将/武人 65~85，狡黠人物敏捷可 65~85，意志坚强者 65~85。属性要能体现人物差异，但不要人人都全能。
 - 身份、性格、语气必须忠于原著。
 - hook 要承接前文结尾的处境，让玩家以该角色自然进入。
 ----- 前文开始 -----
 ${context}
 ----- 前文结束 -----${entryContext}`;
   let roles = [];
+  const roleKey = (full.id||full.title||"book")+"::"+(Number(opts.windowStart)||0);
+  const roleStoreKey = "tavern_role_cards_v1:"+roleKey;
+  if(!roleCardCache.has(roleKey)){
+    try{ const saved=JSON.parse(localStorage.getItem(roleStoreKey)||"null"); if(Array.isArray(saved)) roleCardCache.set(roleKey,saved); }catch(e){}
+  }
+  if(roleCardCache.has(roleKey)) roles = roleCardCache.get(roleKey);
   // 有原文「故事圣经」时，直接用原著真实人物做角色卡，不再让 AI 现编
   const nearbyStart = Math.max(0,(Number(opts.windowStart)||0)-2000);
-  const nearbyText = opts.entryTitle ? full.text.slice(nearbyStart,nearbyStart+12000) : full.text.slice(0,18000);
-  if(full.bible && Array.isArray(full.bible.characters) && full.bible.characters.length){
+  const nearbyText = opts.entryTitle ? full.text.slice(nearbyStart,nearbyStart+1800) : full.text.slice(0,18000);
+  if(!roles.length && full.bible && Array.isArray(full.bible.characters) && full.bible.characters.length){
     const nearbyRoles = full.bible.characters.filter(c=>c && c.name && nearbyText.includes(c.name));
     const source = nearbyRoles.length ? nearbyRoles : (opts.entryTitle ? [] : full.bible.characters);
     roles = source.slice(0,6).map(c=>({
       name:c.name, gender:c.gender||"", species:c.species||"", age:c.age,
-      height:c.height, weight:c.weight, appearance:c.appearance||"", outfit:c.outfit||"",
-      identity:c.identity||"", personality:c.personality||"",
+      height:c.height, weight:c.weight, appearance:c.appearance||"", outfit:c.outfit||"", origin:c.origin||"",
+      identity:c.identity||"", personality:c.personality||"", attrs:normalizeStartAttrs(c.attrs)||undefined,
       hook:opts.entryTitle ? "从「"+opts.entryTitle+"」开场，以「"+c.name+"」的身份行动"
         : "以「"+c.name+"」的身份，从前情结尾处自然进入"
     }));
@@ -1204,7 +1283,7 @@ ${context}
       content = await callLLM([
         { role:"system", content:sys },
         { role:"user", content:"请根据这段前文生成可扮演的角色卡。" }
-      ], signal.signal);
+      ], signal.signal, null, {temperature:0.3});
     }catch(e){
       if(!here()) return;
       status.textContent = "角色卡生成失败："+e.message;
@@ -1221,43 +1300,99 @@ ${context}
       roles = Array.isArray(obj?.roles) ? obj.roles.filter(r=>r && r.name) : [];
     }catch(e){ roles = []; }
   }
+  if(roles.length){
+    status.textContent = "正在补全人物外貌与年龄……";
+    roles = await enrichRoleCards(full,roles,full.text||"",signal.signal);
+    roleCardCache.set(roleKey, roles);
+    try{ localStorage.setItem(roleStoreKey, JSON.stringify(roles)); }catch(e){}
+  }
   if(!roles.length){
     status.textContent = "没有解析出角色，请返回重试。";
     return;
   }
   status.textContent = "选择你要扮演的角色：";
   const wrap = $("role-cards");
-  wrap.innerHTML = "";
-  roles.slice(0,6).forEach(r=>{
-    const btn = document.createElement("button");
-    btn.className = "role-card";
-    btn.innerHTML = '<div class="rc-head"><span class="rc-name">'+escapeHtml(String(r.name))+'</span>'
-      + '<span class="rc-role">'+escapeHtml(String(r.identity||""))+'</span></div>'
-      + '<div class="rc-desc">'+escapeHtml(String(r.personality||""))+'</div>'
-      + (r.hook ? '<div class="rc-open">入场：'+escapeHtml(String(r.hook))+'</div>' : "");
-    btn.onclick = async ()=>{
-      wrap.querySelectorAll(".role-card").forEach(b=>b.disabled=true);
-      $("btn-back").disabled = true;
-      status.textContent = "正在进入故事……";
-      const role = {name:String(r.name), gender:String(r.gender||""), species:String(r.species||""), age:Number.isFinite(Number(r.age))?Math.max(0,Math.round(Number(r.age))):undefined, height:Number.isFinite(Number(r.height))?Math.max(30,Math.round(Number(r.height))):undefined, weight:Number.isFinite(Number(r.weight))?Math.max(2,Math.round(Number(r.weight))):undefined, appearance:String(r.appearance||""), outfit:String(r.outfit||""), identity:String(r.identity||""), personality:String(r.personality||""), hook:String(r.hook||""), income:Number.isFinite(Number(r.income))?Math.max(0,Math.round(Number(r.income))):undefined, coin:Number.isFinite(Number(r.coin))?Math.max(0,Math.round(Number(r.coin))):undefined};
-      const worldStart = [opts.entryTitle,role.name+(role.hook ? "："+role.hook : "")].filter(Boolean).join(" · ");
-      try{
-        await createJourney(full.name, (opts.worldText || context), opts.genre||"", here, {
-          worldStart, title:full.title, author:full.author, role, summary:full.summary||"",
-          source:opts.source, windowStart:opts.windowStart, bible:full.bible,
-          builtinId:opts.builtinId, builtinText:opts.builtinId ? full.text : undefined,
-          bookId:opts.bookId,
-          infiniteMode:Boolean(opts.infiniteMode)
-        });
-      }catch(err){
-        if(!here()) return;
-        status.textContent = err.message || "进入失败，请重试";
-        wrap.querySelectorAll(".role-card").forEach(b=>b.disabled=false);
-        $("btn-back").disabled = false;
-      }
+  const saveRoles = ()=>{
+    roleCardCache.set(roleKey, roles);
+    try{ localStorage.setItem(roleStoreKey, JSON.stringify(roles)); }catch(e){}
+  };
+  function showRoleEditor(index){
+    const r = roles[index];
+    if(!r) return;
+    const at = r.attrs || {iq:50,physique:50,charm:50,willpower:50,agility:50};
+    status.textContent = "修订「"+(r.name||"角色")+"」的设定：";
+    wrap.innerHTML = `
+      <div class="role-editor">
+        <label>姓名<input id="re-name" maxlength="60" value="${escapeHtml(String(r.name||""))}"></label>
+        <div class="role-edit-row"><label>性别<input id="re-gender" maxlength="10" value="${escapeHtml(String(r.gender||""))}"></label><label>年龄<input id="re-age" type="number" min="1" max="200" value="${Number.isFinite(Number(r.age))?Number(r.age):""}"></label></div>
+        <div class="role-edit-row"><label>身高 cm<input id="re-height" type="number" min="30" max="300" value="${Number.isFinite(Number(r.height))?Number(r.height):""}"></label><label>体重 kg<input id="re-weight" type="number" min="2" max="500" value="${Number.isFinite(Number(r.weight))?Number(r.weight):""}"></label></div>
+        <label>身份<input id="re-identity" maxlength="200" value="${escapeHtml(String(r.identity||""))}"></label>
+        <label>性格<input id="re-personality" maxlength="200" value="${escapeHtml(String(r.personality||""))}"></label>
+        <label>外貌<input id="re-appearance" maxlength="300" value="${escapeHtml(String(r.appearance||""))}"></label>
+        <label>衣着<input id="re-outfit" maxlength="200" value="${escapeHtml(String(r.outfit||""))}"></label>
+        <label>出身<input id="re-origin" maxlength="120" value="${escapeHtml(String(r.origin||""))}"></label>
+        <div class="role-edit-attrs">
+          <label>智商<input id="re-iq" type="number" min="0" max="100" value="${at.iq??50}"></label>
+          <label>体质<input id="re-physique" type="number" min="0" max="100" value="${at.physique??50}"></label>
+          <label>魅力<input id="re-charm" type="number" min="0" max="100" value="${at.charm??50}"></label>
+          <label>意志<input id="re-willpower" type="number" min="0" max="100" value="${at.willpower??50}"></label>
+          <label>敏捷<input id="re-agility" type="number" min="0" max="100" value="${at.agility??50}"></label>
+        </div>
+        <div class="card-btns"><button class="big-btn" id="re-save">保存修订</button><button class="big-btn ghost" id="re-cancel">取消</button></div>
+      </div>`;
+    $("re-cancel").onclick = renderRoleList;
+    $("re-save").onclick = ()=>{
+      const name = $("re-name").value.trim();
+      if(!name){ status.textContent = "姓名不能为空。"; return; }
+      const num = (id,min,max)=>{ const n = Number($(id).value); return Number.isFinite(n) ? Math.max(min,Math.min(max,Math.round(n))) : undefined; };
+      roles[index] = {...r, name,
+        gender:$("re-gender").value.trim(), age:num("re-age",1,200),
+        height:num("re-height",30,300), weight:num("re-weight",2,500),
+        identity:$("re-identity").value.trim(), personality:$("re-personality").value.trim(),
+        appearance:$("re-appearance").value.trim(), outfit:$("re-outfit").value.trim(),
+        origin:$("re-origin").value.trim(),
+        attrs:{iq:num("re-iq",0,100)??50,physique:num("re-physique",0,100)??50,charm:num("re-charm",0,100)??50,willpower:num("re-willpower",0,100)??50,agility:num("re-agility",0,100)??50}
+      };
+      saveRoles();
+      renderRoleList();
     };
-    wrap.appendChild(btn);
-  });
+  }
+  function renderRoleList(){
+    status.textContent = "选择你要扮演的角色：";
+    wrap.innerHTML = "";
+    roles.slice(0,6).forEach((r,index)=>{
+      const btn = document.createElement("button");
+      btn.className = "role-card";
+      btn.innerHTML = '<span class="rc-edit">修订</span><div class="rc-head"><span class="rc-name">'+escapeHtml(String(r.name))+'</span>'
+        + '<span class="rc-role">'+escapeHtml([r.identity,Number.isFinite(Number(r.age))?Number(r.age)+"岁":""].filter(Boolean).join(" · "))+'</span></div>'
+        + '<div class="rc-desc">'+escapeHtml(String(r.personality||""))+'</div>'
+        + (r.hook ? '<div class="rc-open">入场：'+escapeHtml(String(r.hook))+'</div>' : "");
+      btn.onclick = async (e)=>{
+        if(e.target.closest(".rc-edit")){ showRoleEditor(index); return; }
+        wrap.querySelectorAll(".role-card").forEach(b=>b.disabled=true);
+        $("btn-back").disabled = true;
+        status.textContent = "正在进入故事……";
+        const role = {name:String(r.name), gender:String(r.gender||""), species:String(r.species||""), origin:String(r.origin||""), age:Number.isFinite(Number(r.age))&&Number(r.age)>0?Math.round(Number(r.age)):undefined, height:Number.isFinite(Number(r.height))?Math.max(30,Math.round(Number(r.height))):undefined, weight:Number.isFinite(Number(r.weight))?Math.max(2,Math.round(Number(r.weight))):undefined, appearance:String(r.appearance||""), outfit:String(r.outfit||""), identity:String(r.identity||""), personality:String(r.personality||""), hook:String(r.hook||""), attrs:normalizeStartAttrs(r.attrs)||undefined, income:Number.isFinite(Number(r.income))?Math.max(0,Math.round(Number(r.income))):undefined, coin:Number.isFinite(Number(r.coin))?Math.max(0,Math.round(Number(r.coin))):undefined};
+        const worldStart = [opts.entryTitle,role.name+(role.hook ? "："+role.hook : "")].filter(Boolean).join(" · ");
+        try{
+          await createJourney(full.name, (opts.worldText || context), opts.genre||"", here, {
+            worldStart, title:full.title, author:full.author, role, summary:full.summary||"",
+            source:opts.source, windowStart:opts.windowStart, bible:full.bible,
+            builtinId:opts.builtinId, builtinText:opts.builtinId ? full.text : undefined,
+            bookId:opts.bookId,
+            infiniteMode:Boolean(opts.infiniteMode)
+          });
+        }catch(err){
+          if(!here()) return;
+          status.textContent = err.message || "进入失败，请重试";
+          wrap.querySelectorAll(".role-card").forEach(b=>b.disabled=false);
+          $("btn-back").disabled = false;
+        }
+      };
+      wrap.appendChild(btn);
+    });
+  }
+  renderRoleList();
 }
 
 async function generateWorldSummary(text, onProgress){
@@ -1281,8 +1416,8 @@ ${source}
 /* 为上传/粘贴的小说生成结构化「故事圣经」：概要、人物、关系、伏笔、锚点 */
 async function generateWorldBible(text, onProgress){
   const CHUNK_SYS = `你是文学分析助手。阅读给定的小说原文片段，只输出一个 JSON 对象，不要任何多余文字。格式：
-{"summary":"本段剧情梗概（200~400字）","characters":[{"name":"人物姓名（原文真实姓名）","gender":"男/女","age":0,"identity":"身份与处境","personality":"性格","voice":"说话习惯/称呼","goal":"动机","status":"感情/婚姻状态","attitude":"对主要人物的态度","knows":"此人目前知道的关键事实"}],"relationships":[{"a":"人物A","b":"人物B","relation":"亲属/朋友/恋人/夫妻/仇敌/主仆等","aff":0,"desire":0}],"foreshadowing":["伏笔或未解线索"],"timeline":["关键事件"]}
-要求：姓名必须来自原文；没有的字段可省略；aff/desire 是 0~100 的估计；不要编造原文没有的核心人物。`;
+{"summary":"本段剧情梗概（200~400字）","characters":[{"name":"人物姓名（原文真实姓名）","gender":"男/女","species":"人类/动物/妖怪/机械等","age":30,"height":170,"weight":65,"identity":"身份与处境","job":"职业或谋生方式","appearance":"发型发色、眼睛、肤色、体型、疤痕等可观察特征","outfit":"当前衣着与随身装备","origin":"地域/族裔/时代","personality":"性格","voice":"说话习惯/称呼","goal":"动机","status":"感情/婚姻状态","attitude":"对主要人物的态度","knows":"此人目前知道的关键事实","wealth":"财产状况","coin":0,"rep":0,"moral":0,"wanted":0,"attrs":{"iq":0,"physique":0,"charm":0,"willpower":0,"agility":0}}],"relationships":[{"a":"人物A","b":"人物B","relation":"亲属/朋友/恋人/夫妻/仇敌/主仆等","aff":0,"desire":0}],"foreshadowing":["伏笔或未解线索"],"timeline":["关键事件"]}
+要求：姓名必须来自原文；没有的字段可省略，年龄未知就省略或写 null，绝不能写 0 岁；aff/desire 是 0~100 的估计；attrs 是五项属性 0~100 的绝对值，按人物身体、头脑、性情给不同数值，不要全部写 50；不要编造原文没有的核心人物。`;
   const FINAL_SYS = `你是文学编辑。根据给定的分段分析，整理成一部书的「故事圣经」，只输出一个 JSON 对象。格式：
 {"summary":"全书概要（600~900字，覆盖主线、人物命运与结局；若原文未完，说明现有文本到哪为止）","ending":"现有文本的收束或未完成状态（200字内）","anchors":["必须始终成立、不可违背的核心事实（5~12条）"],"themes":["主题关键词"],"tone":"整体文风与基调"}
 只依据给出的分析，不要编造重大情节。`;
@@ -1356,22 +1491,26 @@ function importTitleFromFile(fileName){
   const base = String(fileName||"").replace(/^.*[\\/]/,"").replace(/\.[^.]+$/,"").trim();
   return (base || "我的小说").slice(0,120);
 }
-async function autoImportToShelf(fileName,text){
-  const title = importTitleFromFile(fileName);
+async function autoImportToShelf(fileName,text,explicitTitle=""){
+  const title = String(explicitTitle||"").trim().slice(0,120) || importTitleFromFile(fileName);
   const token = AUTH.token;
   const card = $("card");
   $("overlay").classList.remove("hidden");
   card.innerHTML = `
     <div class="home">
       <header class="home-header"><h1>正在导入</h1></header>
-      <p class="sub">已读取《${escapeHtml(title)}》${Math.round(text.length/1000)}k 字。系统会自动分析并加入「小说剧本」，不需要选择任何选项。</p>
+      <p class="sub">已读取《${escapeHtml(title)}》${Math.round(text.length/1000)}k 字。系统会自动分析并加入「小说剧本」；可以先返回酒馆，任务会在后台继续。</p>
       <p class="form-note" id="auto-import-status" role="status">正在准备……</p>
+      <div class="card-btns"><button class="big-btn ghost" id="auto-import-back" type="button">返回酒馆（后台继续）</button></div>
     </div>`;
   const status = $("auto-import-status");
   const here = ()=>AUTH.token===token && $("auto-import-status")===status;
+  let detached = false;
+  const back = $("auto-import-back");
+  if(back) back.onclick = ()=>{ detached = true; showTitle(); };
   let bible = null, summary = "";
   try{
-    status.textContent = "正在生成故事圣经……";
+    if(here()) status.textContent = "正在生成故事圣经……";
     bible = await generateWorldBible(text, msg=>{ if(here()) status.textContent = msg || "正在生成故事圣经……"; });
     summary = (bible && bible.summary) || "";
   }catch(e){
@@ -1382,8 +1521,8 @@ async function autoImportToShelf(fileName,text){
       if(here()) status.textContent = "自动分析失败，将直接保存原文……";
     }
   }
-  if(!here()) return;
-  status.textContent = "正在写入书架……";
+  if(AUTH.token !== token) return;
+  if(here()) status.textContent = "正在写入书架……";
   try{
     const {world} = await api("/api/worlds",{method:"POST",body:{
       name:title,text,genre:guessImportGenre(text),source:"upload",createNew:false,
@@ -1394,12 +1533,18 @@ async function autoImportToShelf(fileName,text){
       name:title,text:"",genre:guessImportGenre(text),source:"upload",createNew:false,
       summary,title,windowStart:0,infiniteMode:false,bible,bookId:world.id
     }});
-    await showTitle();
-    menuNote("《"+title+"》已加入「小说剧本」，并出现在「我的旅途」中。");
-    const mine = [...document.querySelectorAll("details.library")].find(d=>
-      /小说剧本/.test((d.querySelector("summary")||{}).textContent||""));
-    if(mine) mine.open = true;
+    const note = "《"+title+"》已加入「小说剧本」，并出现在「我的旅途」中。";
+    if(!detached || $("menu-note")){
+      await showTitle();
+      menuNote(note);
+      const mine = [...document.querySelectorAll("details.library")].find(d=>
+        /小说剧本/.test((d.querySelector("summary")||{}).textContent||""));
+      if(mine) mine.open = true;
+    }else{
+      imageToast(note,5000);
+    }
   }catch(e){
+    if(!detached && !$("menu-note")){ imageToast("导入失败："+e.message,7000); return; }
     await showTitle();
     menuNote("导入失败："+e.message);
   }
@@ -1412,63 +1557,31 @@ async function savePasteAsBook({name,text,genre="",summary="",bible=null}){
   if(!world) throw new Error("写入小说剧本失败");
   return world;
 }
-function showPasteWorld({name = "",text = "",saveBook = true} = {}, start = false){
+function showPasteWorld({name = "",text = ""} = {}){
   const card = $("card");
   card.innerHTML = `
-    <h1>粘贴文字开始故事</h1>
-    <div class="sub">从小说片段的结尾续写，或用世界设定开启第一幕</div>
+    <h1>粘贴文字导入</h1>
+    <div class="sub">粘贴正文或设定，系统会自动分析并加入「小说剧本」，不需要选择其他选项。</div>
     <form class="auth-form paste-world" id="paste-world">
-      <label for="paste-name">旅途名称 / 书名（直接用作书库名称）</label>
+      <button class="big-btn ghost" id="paste-back" type="button" style="margin-bottom:8px">← 返回酒馆</button>
+      <label for="paste-name">旅途名称 / 书名（可选）</label>
       <input id="paste-name" maxlength="80" placeholder="例如：雨夜列车">
-      <label for="paste-text">小说片段或世界设定</label>
+      <label for="paste-text">小说正文或世界设定</label>
       <textarea id="paste-text" rows="6" maxlength="500000" required placeholder="把正文或设定粘贴在这里，最多 50 万字符"></textarea>
-      <label for="paste-genre">故事类型（可选：选「恋爱/日常」会弱化任务、以关系为主线）</label>
-      <select id="paste-genre">
-        <option value="">自动判断</option>
-        ${GENRES.filter(g=>g.id!=="随机").map(g=>`<option value="${g.id}">${g.id} · ${g.desc}</option>`).join("")}
-      </select>
-      <label class="check-line" for="paste-infinite"><input type="checkbox" id="paste-infinite"> 无限模式：主线结束后继续写，不自动收束</label>
-      <label class="check-line" for="paste-save-book"><input type="checkbox" id="paste-save-book" ${saveBook ? "checked" : ""}> 同时放入小说剧本（之后可从书库重新进入）</label>
       <div class="form-note" id="paste-status" role="status"></div>
-      <div class="enter-pct">
-        <label for="paste-range">从这段文字的哪里继续 <span id="paste-pct-label">使用全部（从末尾续写）</span></label>
-        <input type="range" id="paste-range" min="0.5" max="100" step="0.5" value="100">
-        <div class="enter-preview" id="paste-preview"></div>
-      </div>
-      <label class="check-line" for="paste-summary"><input type="checkbox" id="paste-summary"> 开始前生成概要（更连贯，约十几秒）</label>
-      <label class="check-line" for="paste-bible"><input type="checkbox" id="paste-bible"> 生成故事圣经（人物/关系/伏笔，较慢但更忠于原文）</label>
-      <button class="big-btn" id="paste-roles" type="button">选择角色并开始</button>
-      <button class="big-btn ghost" id="paste-back" type="button">返回酒馆</button>
+      <button class="big-btn" type="submit">导入到书架</button>
     </form>`;
-  const form = $("paste-world"), field = $("paste-text"), status = $("paste-status");
-  const title = $("paste-name");
-  const range = $("paste-range"), pctLabel = $("paste-pct-label"), preview = $("paste-preview"), summaryChk = $("paste-summary");
-  const bibleChk = $("paste-bible");
-  const genreSel = $("paste-genre");
-  const infiniteChk = $("paste-infinite");
-  const saveBookChk = $("paste-save-book");
-  const saveToLibrary = ()=> !!(saveBookChk && saveBookChk.checked);
-  const infiniteMode = ()=> !!(infiniteChk && infiniteChk.checked);
+  const form = $("paste-world"), field = $("paste-text"), title = $("paste-name"), status = $("paste-status");
+  const back = $("paste-back");
+  if(back) back.onclick = showTitle;
   title.value = name;
   field.value = text;
-  card.scrollTop = 0;
-  const back = $("paste-back");
-  const rolesBtn = $("paste-roles");
+  let busy = false;
   const token = AUTH.token;
   const stillHere = ()=>AUTH.token===token && $("paste-world")===form;
-  const sliceText = ()=>{ const pct = Number(range.value); const v = field.value.trim(); return pct>=100 ? v : v.slice(0, Math.max(1, Math.floor(v.length*pct/100))); };
-  const windowStartOf = (v)=>{ const pct = Number(range.value); return pct>=100 ? Math.max(0, v.length-20000) : Math.max(0, Math.floor(v.length*pct/100)); };
-  function updatePreview(){
-    const pct = Number(range.value);
-    const sliced = sliceText();
-    pctLabel.textContent = pct>=100 ? "从末尾续写（全部作为前情）" : "从第 "+pct+"% 处续写（前情约 "+Math.round(sliced.length/1000)+"k 字，之后的内容作为后续参考）";
-    preview.textContent = sliced.slice(-260) || "（尚无内容）";
-    preview.scrollTop = preview.scrollHeight;
-  }
-  range.oninput = updatePreview;
-  updatePreview();
-  back.onclick = showTitle;
-  rolesBtn.onclick = async ()=>{
+  form.onsubmit = async (e)=>{
+    e.preventDefault();
+    if(busy) return;
     const full = field.value.trim();
     if(!full || full.length>500000){
       field.setCustomValidity("请粘贴 1 至 50 万字符的小说片段或设定。");
@@ -1476,54 +1589,29 @@ function showPasteWorld({name = "",text = "",saveBook = true} = {}, start = fals
       return;
     }
     if(!isLoggedIn()){
-      showLogin("登录后才能生成角色卡。",{
-        onSuccess:()=>showPasteWorld({name:title.value,text:field.value,saveBook:saveToLibrary()}),
-        onBack:()=>showPasteWorld({name:title.value,text:field.value,saveBook:saveToLibrary()})
+      showLogin("登录后会把这段文字加入书库。",{
+        onSuccess:()=>showPasteWorld({name:title.value,text:field.value}),
+        onBack:()=>showPasteWorld({name:title.value,text:field.value})
       });
       return;
     }
-    const text = sliceText();
-    if(!text){ status.textContent = "请粘贴至少一小段文字。"; return; }
-    const name = title.value.trim() || "我的小说世界";
-    rolesBtn.disabled = true; back.disabled = true;
-    let summary = "", bible = null, bookId = "";
+    busy = true;
+    field.setCustomValidity("");
     try{
-      if(bibleChk.checked){
-        status.textContent = "正在分析原文，生成故事圣经……";
-        bible = await generateWorldBible(full, msg=>{ if(stillHere()) status.textContent = msg; });
-        summary = bible.summary || "";
-      }else if(summaryChk.checked){
-        status.textContent = "正在生成概要……";
-        summary = await generateWorldSummary(full, p=>{ if(stillHere()) status.textContent = "正在生成概要……"+(p?"已接收 "+p.length+" 字":""); });
-      }
-      if(!stillHere()) return;
-      if(saveToLibrary()){
-        status.textContent = "正在写入小说剧本……";
-        const book = await savePasteAsBook({name,text:full,genre:genreSel.value,summary,bible});
-        bookId = book.id;
-      }
-    }catch(e){
-      if(!stillHere()) return;
-      status.textContent = "准备失败："+e.message;
-      rolesBtn.disabled = back.disabled = false;
-      return;
+      await autoImportToShelf("",full,title.value.trim());
+    }catch(err){
+      if(stillHere()) status.textContent = err.message || "导入失败";
+      busy = false;
     }
-    if(!stillHere()) return;
-    status.textContent = "正在准备角色卡……";
-    const cut = windowStartOf(full);
-    const pct = Number(range.value);
-    const entryTitle = cut===0 ? "原文开头" : (pct>=100 ? "原文末尾" : "原文 "+pct+"% 处");
-    showRoleCards({name, title:name, text:full, author:"", summary, bible}, text, null, null, {source:"paste", genre:genreSel.value, windowStart:cut, entryTitle, worldText:full, bookId, infiniteMode:infiniteMode()});
   };
-  field.oninput = ()=>{ field.setCustomValidity(""); updatePreview(); };
-  form.onsubmit = e=>e.preventDefault();
+  field.oninput = ()=>field.setCustomValidity("");
   field.focus({preventScroll:true});
 }
 
 function journeyRole(value){
   if(!value || typeof value.name!=="string" || !value.name.trim()) return null;
   const role = {};
-  for(const key of ["name","gender","identity","personality","hook","species"]){
+  for(const key of ["name","gender","identity","personality","hook","species","origin","appearance","outfit"]){
     role[key] = typeof value[key]==="string" ? value[key].slice(0,300) : "";
   }
   for(const key of ["coin","income"]){
@@ -1532,6 +1620,8 @@ function journeyRole(value){
   for(const key of ["age","height","weight"]){
     if(Number.isFinite(Number(value[key])) && Number(value[key])>0) role[key]=Math.round(Number(value[key]));
   }
+  const attrs = normalizeStartAttrs(value.attrs);
+  if(attrs) role.attrs = attrs;
   return role;
 }
 
@@ -1558,19 +1648,31 @@ function storyBibleForState(b,windowStart){
 function startJourney(world,openOnEntry = true){
   cancelTurn();
   undoStack = [];
-  if(autoImageAbort){ autoImageAbort.abort(); autoImageAbort = null; }
   journeyOwner = AUTH.username;
   const inferredGenre = world.genre || (world.text ? (guessImportGenre(world.text) || guessGenre(world.text)) : "");
   S = {...DEFAULT_STATE(),ai:true,infiniteMode:Boolean(world.infiniteMode),species:world.species||(world.role&&world.role.species)||"",world:world.text||"",worldSource:world.source||"",worldName:world.name||world.title||"",worldStart:world.worldStart||"",worldRole:world.role||null,worldSummary:world.summary||"",worldWindow:world.windowStart||0,worldId:world.id,bookId:world.bookId||"",builtinId:world.builtinId||"",genre:inferredGenre};
   activeBuiltinBible = S.builtinId && world.bible ? world.bible : null;
   S.romanceMode = computeRomanceMode(S);
+  if(!world.role){
+    const attrs = rollStartingAttrs();
+    for(const key of START_ATTR_KEYS) S[key] = attrs[key];
+    S.hpMax = clamp(Math.round(80 + (S.physique||50)*0.4), 40, 140);
+    S.hp = S.hpMax;
+  }
   if(!S.gender && world.role && world.role.gender) S.gender = String(world.role.gender).slice(0,10);
   if(world.role){
     if(Number.isFinite(world.role.income)) S.incomePerDay = world.role.income;
     if(Number.isFinite(world.role.coin)) S.coin = world.role.coin;
-    if(Number.isFinite(world.role.age)) S.age = world.role.age;
+    if(Number.isFinite(world.role.age) && world.role.age>0) S.age = world.role.age;
     if(Number.isFinite(world.role.height)) S.height = world.role.height;
     if(Number.isFinite(world.role.weight)) S.weight = world.role.weight;
+    if(world.role.appearance) S.appearance = world.role.appearance;
+    if(world.role.outfit) S.outfit = world.role.outfit;
+    if(world.role.origin) S.origin = world.role.origin;
+    const attrs = inferRoleAttrs(world.role);
+    for(const key of START_ATTR_KEYS) S[key] = attrs[key];
+    S.hpMax = clamp(Math.round(80 + (S.physique||50)*0.4), 40, 140);
+    S.hp = S.hpMax;
     S.playerIdentity = { name:String(world.role.name||""), identity:String(world.role.identity||""), desc:String(world.role.personality||"") };
   }
   // 若有原著「故事圣经」，用真实人物、关系、锚点初始化，提升还原度
@@ -1580,12 +1682,22 @@ function startJourney(world,openOnEntry = true){
     if(Array.isArray(b.anchors) && b.anchors.length) S.anchors = [...b.anchors].slice(-24);
     if(Array.isArray(b.characters) && b.characters.length && !S.cast.length){
       S.cast = b.characters.filter(c=>c && c.name).slice(0,20).map(c=>({
-        name:c.name, background:c.identity||"", personality:c.personality||"", hobby:"", voice:c.voice||"",
+        name:c.name, background:c.identity||c.background||"", personality:c.personality||"", hobby:"", voice:c.voice||"",
         goal:c.goal||"", attitude:c.attitude||"", knows:c.knows||"", changes:[],
-        age:Number.isFinite(c.age)?c.age:undefined, gender:c.gender||"",
-        adult:Number.isFinite(c.age)?c.age>=18:true, status:c.status||"",
+        identity:c.identity||c.job||"", job:c.job||c.identity||"", status:c.status||"",
+        age:Number.isFinite(Number(c.age))&&Number(c.age)>0?Math.round(Number(c.age)):undefined, gender:c.gender||"",
+        species:c.species||"", height:Number.isFinite(Number(c.height))?Math.round(Number(c.height)):undefined,
+        weight:Number.isFinite(Number(c.weight))?Math.round(Number(c.weight)):undefined,
+        appearance:c.appearance||"", outfit:c.outfit||"", origin:c.origin||"",
+        wealth:c.wealth||"", coin:Number.isFinite(Number(c.coin))?Math.round(Number(c.coin)):undefined,
+        rep:Number.isFinite(Number(c.rep))?Math.round(Number(c.rep)):undefined,
+        moral:Number.isFinite(Number(c.moral))?Math.round(Number(c.moral)):undefined,
+        wanted:Number.isFinite(Number(c.wanted))?Math.round(Number(c.wanted)):undefined,
+        hp:Number.isFinite(Number(c.hp))?Math.round(Number(c.hp)):undefined,
+        attrs:normalizeStartAttrs(c.attrs)||undefined, combat:c.combat||null,
+        adult:Number.isFinite(Number(c.age))?Number(c.age)>=18:undefined,
         desire:0, links:[]
-      }));
+      })).map(c=>ensureNpcDefaults(c,S));
       const byName = new Map(S.cast.map(c=>[c.name,c]));
       for(const r of (b.relationships||[])){
         const A = byName.get(r.a), B = byName.get(r.b);
@@ -1597,6 +1709,21 @@ function startJourney(world,openOnEntry = true){
     }
     S.worldBible = storyBibleForState(b, S.worldWindow);
   }
+  const selfName = String(S.playerIdentity?.name || S.worldRole?.name || "").trim();
+  if(selfName){
+    S.cast = (S.cast||[]).filter(c=>c && c.name!==selfName);
+    S.present = (S.present||[]).filter(n=>n!==selfName);
+  }
+  if(typeof ensureNpcDefaults==="function") S.cast = dedupeCast((S.cast||[]).map(c=>ensureNpcDefaults(c,S)));
+  if(typeof dbBackfillWorld==="function") dbBackfillWorld(S).catch(()=>{});
+  if(typeof warmSemanticMemory==="function"){
+    const dbState = S;
+    warmSemanticMemory().then(ok=>{
+      if(ok && dbState===S && typeof backfillEmbeddings==="function"){
+        backfillEmbeddings(tavernWorldId(dbState)).catch(()=>{});
+      }
+    }).catch(()=>{});
+  }
   const trial = isTwoDayTrial(S);
   if(trial) seedTwoDayTrial(S);
   ensureEconomy(S);
@@ -1607,6 +1734,8 @@ function startJourney(world,openOnEntry = true){
   else $("action-text").focus();
 }
 function enterStory(){
+  npcDetailName = "";
+  npcEditName = "";
   $("overlay").classList.add("hidden");
   closeDrawer();
   const title = $("story-title");
@@ -1631,7 +1760,7 @@ function enterStory(){
     }
   }
   renderLog();
-  if(S.ai){ showCurrentScene(""); syncSceneImageButton(); if(S.sceneImageAuto) autoSceneImage(); return; }
+  if(S.ai){ showCurrentScene(""); return; }
   refreshStats();
   refreshSide();
   if(S.node==="__end_good" || S.node==="__end_bad") showEnding(S.node==="__end_good");
@@ -1650,6 +1779,22 @@ function startClassic(save){
   if(!save) goNode("start");
 }
 
+function pruneStateForSave(state){
+  const save = {...state};
+  save.history = (state.history||[]).slice(-10);
+  save.log = (state.log||[]).slice(-80);
+  save.memory = (state.memory||[]).slice(-20);
+  save.longTerm = String(state.longTerm||"").slice(-4000);
+  save.lifeEvents = (state.lifeEvents||[]).slice(-80);
+  save.lifeReactions = (state.lifeReactions||[]).slice(-80);
+  save.consequences = (state.consequences||[]).slice(-40);
+  save.anchors = (state.anchors||[]).slice(-24);
+  save.sceneHistory = (state.sceneHistory||[]).slice(-8);
+  delete save.npcEnrichPending;
+  delete save.filteredSpeakers;
+  return save;
+}
+
 async function saveProgress(manual = false){
   const state = S;
   const status = (message)=>{
@@ -1658,12 +1803,13 @@ async function saveProgress(manual = false){
     if($("ending-status")) $("ending-status").textContent = message;
   };
   if(!state.ai){
-    try{ localStorage.setItem(CLASSIC_KEY,JSON.stringify(state)); status("已保存在此浏览器"); }
+    try{ localStorage.setItem(CLASSIC_KEY,JSON.stringify(pruneStateForSave(state))); status("已保存在此浏览器"); }
     catch(e){ status("此浏览器无法保存进度"); }
     return;
   }
   if(!state.turn){ if(manual) status("完成第一幕后可以保存"); return; }
-  const {world, ...save} = state;
+  const {world, ...rawSave} = state;
+  const save = pruneStateForSave(rawSave);
   const token = AUTH.token;
   status("正在保存……");
   const operation = saveQueue.then(()=>api("/api/save",{method:"PUT",body:{id:state.worldId,save},token}));
@@ -1698,12 +1844,30 @@ async function loadWorld(id,stillHere){
     }
     if(!stillHere()) return;
   }
+  if(!save && world.bookId){
+    showEnterSelect({...world,id:world.bookId,name:world.name||world.title||"我的小说",title:world.title||world.name||"我的小说"},stillHere);
+    return;
+  }
   if(!save){ startJourney(world); return; }
   journeyOwner = AUTH.username;
   S = {...DEFAULT_STATE(),...save,ai:true,infiniteMode:save.infiniteMode ?? Boolean(world.infiniteMode),species:save.species||(world.role&&world.role.species)||"",world:save.world||world.text||"",worldSource:world.source||"",worldName:world.name,worldId:id,builtinId:world.builtinId||""};
   undoStack = [];
-  if(autoImageAbort){ autoImageAbort.abort(); autoImageAbort = null; }
   activeBuiltinBible = S.builtinId && world.bible ? world.bible : null;
+  const selfName = String(S.playerIdentity?.name || S.worldRole?.name || "").trim();
+  if(selfName){
+    S.cast = (S.cast||[]).filter(c=>c && c.name!==selfName);
+    S.present = (S.present||[]).filter(n=>n!==selfName);
+  }
+  if(typeof ensureNpcDefaults==="function") S.cast = dedupeCast((S.cast||[]).map(c=>ensureNpcDefaults(c,S)));
+  if(typeof dbBackfillWorld==="function") dbBackfillWorld(S).catch(()=>{});
+  if(typeof warmSemanticMemory==="function"){
+    const dbState = S;
+    warmSemanticMemory().then(ok=>{
+      if(ok && dbState===S && typeof backfillEmbeddings==="function"){
+        backfillEmbeddings(tavernWorldId(dbState)).catch(()=>{});
+      }
+    }).catch(()=>{});
+  }
   const oldExhaustionEnding = S.hp<=0 && S.ending?.title==="力竭而倒"
     && S.ending.text?.endsWith("体力耗尽，这一夜就此终结。");
   if(oldExhaustionEnding) S.ending = null;
@@ -1715,6 +1879,15 @@ async function loadWorld(id,stillHere){
     if((!S.anchors || !S.anchors.length) && Array.isArray(world.bible.anchors)) S.anchors = world.bible.anchors.slice(-24);
   }
   if(!S.worldWindow) S.worldWindow = 0;
+  if(!S.log.length && Array.isArray(S.history)){
+    const last = S.history.findLast(h=>h && h.role==="assistant");
+    if(last){
+      try{
+        const scene = readScene(last.content);
+        if(scene.lines.length) S.log = scene.lines;
+      }catch(e){}
+    }
+  }
   if(!S.choices.length && !S.ending){
     const last = S.history.findLast(h=>h.role==="assistant");
     try{

@@ -61,6 +61,22 @@ function seedTwoDayTrial(state){
   });
 }
 
+const STORY_DETAIL_KEY = "tavern_story_detail_v1";
+function storyDetailFull(){
+  try{ return localStorage.getItem(STORY_DETAIL_KEY)==="full"; }
+  catch(e){ return false; }
+}
+function setStoryDetailFull(on){
+  try{ localStorage.setItem(STORY_DETAIL_KEY,on?"full":"compact"); }catch(e){}
+}
+const IDLE_AUTO_KEY = "tavern_idle_auto_v1";
+function idleAutoEnabled(){
+  try{ return localStorage.getItem(IDLE_AUTO_KEY)!=="0"; }
+  catch(e){ return true; }
+}
+function setIdleAutoEnabled(on){
+  try{ localStorage.setItem(IDLE_AUTO_KEY,on?"1":"0"); }catch(e){}
+}
 const DEFAULT_STATE = () => ({
   coin: 15,
   hp: 100,
@@ -125,9 +141,7 @@ const DEFAULT_STATE = () => ({
   weight: null,    // 体重 kg
   history: [],     // LLM 对话历史 [{role,content}]
   scene: "",       // 当前场景摘要
-  sceneImageAuto: false, // 自动为每个剧情点生成配图
-  autoImageTimeouts: 0, // 自动配图连续超时次数
-  lastAutoSceneTurn: -1, // 上次自动配图对应的幕数
+  sceneImageKey: "",
   turn: 0,         // AI 回合计数
   memory: [],      // 长期记忆：关键事实清单
   summary: "",     // 滚动剧情摘要
@@ -136,6 +150,13 @@ const DEFAULT_STATE = () => ({
   cast: [],        // 人物档案、所知、关系变化和最近行动
   present: null,   // 人物姓名列表。旧存档在下一幕补齐
   plot: {},        // {goal, conflict, next}
+  chapter: null,   // 当前篇章 {title,goal,stakes,next,phase,startedTurn,startedMinute,titleMinute}
+  lastTitleNudgeMinute: null,
+  sceneHistory: [], // 最近场景 [{turn,place,scene,advance,summary}]
+  openLoops: [],   // 未了事项 [{id,text,kind,createdTurn,createdMinute,dueTurn,dueMinute,participants}]
+  loopSeq: 0,
+  lastLoopNudgeMinute: null,
+  loopHistory: [], // 已收回的未了事项
   environment: {minute:null,startDate:null,era:"",background:"",place:"",weather:"",conditions:""},
   weatherState: null, // 本地天气：同一地点同一天保持一致
   consequences: [], // 玩家决定留下的事实，以及尚未发生的后续
@@ -179,8 +200,10 @@ let activeTurn = null;
 let idleTimer = null;
 let idleRaf = null;
 let undoStack = [];
+let roleCardCache = new Map();
+let npcDetailName = "";
+let npcEditName = "";
 const UNDO_LIMIT = 2;
-let autoImageAbort = null;
 let saveQueue = Promise.resolve();
 let journeyOwner = "";
 
@@ -272,7 +295,7 @@ function renderProviderSelect(){
   }));
 }
 
-async function showPersonalAI(){
+async function showPersonalAI(back = showTitle){
   const token = AUTH.token;
   const card = $("card");
   card.innerHTML = `
@@ -294,7 +317,8 @@ async function showPersonalAI(){
   const form = $("personal-ai"), base = $("personal-base"), model = $("personal-model"), key = $("personal-key");
   const status = $("personal-status"), save = $("personal-save"), test = $("personal-test"), remove = $("personal-delete");
   const here = ()=>AUTH.token===token && $("personal-ai")===form;
-  $("personal-back").onclick = showTitle;
+  $("personal-back").onclick = back;
+  if(back!==showTitle) $("personal-back").textContent = "返回设置";
   let personal = null, ready = false;
   function show(value){
     personal = value;
@@ -433,6 +457,17 @@ function singleApi(path, { method="GET", body } = {}){
     w.savedAt = now;
     saveSingleWorlds(worlds);
     return {world:w};
+  }
+  if(p==="/api/worlds/delete-book" && method==="POST"){
+    const id = body && body.id;
+    if(!id) throw singleErr(400,"无效的书目编号");
+    const worlds=singleWorlds();
+    const target=worlds.find(w=>w.id===id);
+    if(!target || !target.isBook) throw singleErr(400,"这不是书库中的小说剧本");
+    const ids=new Set([id,...worlds.filter(w=>w.bookId===id).map(w=>w.id)]);
+    saveSingleWorlds(worlds.filter(w=>!ids.has(w.id)));
+    for(const wid of ids){ try{ localStorage.removeItem(singleSaveKey(wid)); }catch(e){} }
+    return {ok:true,deleted:[...ids]};
   }
   if(p==="/api/worlds/delete" && method==="POST"){
     const id = body && body.id;
@@ -614,7 +649,7 @@ function refreshStats(){
   const status = $("world-status");
   const env = S.environment;
   status.textContent = S.ai ? [formatClock(S),env.place,env.weather].filter(Boolean).join(" · ")
-    : formatStoryTime(env.minute);
+    : formatStoryTime(env.minute,S);
   status.hidden = !status.textContent;
 }
 
@@ -656,6 +691,125 @@ function refreshSide(){
         + abilityCardsHtml
         + (memories.length ? card("已掌握线索",'<div class="qd">'+memories.map(m=>escapeHtml(m)).join("<br>")+'</div>') : "");
     }else if(tab==="char"){
+      const editNpc = npcEditName ? (S.cast||[]).find(c=>c && c.name===npcEditName) : null;
+      if(editNpc){
+        const c = editNpc;
+        body.innerHTML = `
+          <div class="role-editor">
+            <label>姓名<input id="ne-name" maxlength="60" value="${escapeHtml(String(c.name||""))}"></label>
+            <div class="role-edit-row"><label>性别<input id="ne-gender" maxlength="10" value="${escapeHtml(String(c.gender||""))}"></label><label>年龄<input id="ne-age" type="number" min="1" max="200" value="${Number.isFinite(Number(c.age))?Number(c.age):""}"></label></div>
+            <div class="role-edit-row"><label>身高 cm<input id="ne-height" type="number" min="30" max="300" value="${Number.isFinite(Number(c.height))?Number(c.height):""}"></label><label>体重 kg<input id="ne-weight" type="number" min="2" max="500" value="${Number.isFinite(Number(c.weight))?Number(c.weight):""}"></label></div>
+            <label>物种<input id="ne-species" maxlength="40" value="${escapeHtml(String(c.species||""))}"></label>
+            <label>身份<input id="ne-identity" maxlength="200" value="${escapeHtml(String(c.identity||""))}"></label>
+            <label>职业<input id="ne-job" maxlength="120" value="${escapeHtml(String(c.job||""))}"></label>
+            <label>外貌<input id="ne-appearance" maxlength="300" value="${escapeHtml(String(c.appearance||""))}"></label>
+            <label>衣着<input id="ne-outfit" maxlength="200" value="${escapeHtml(String(c.outfit||""))}"></label>
+            <label>性格<input id="ne-personality" maxlength="200" value="${escapeHtml(String(c.personality||""))}"></label>
+            <label>背景<input id="ne-background" maxlength="400" value="${escapeHtml(String(c.background||""))}"></label>
+            <label>长期目标<input id="ne-goal" maxlength="200" value="${escapeHtml(String(c.goal||""))}"></label>
+            <label>眼下打算<input id="ne-agenda" maxlength="200" value="${escapeHtml(String(c.agenda||""))}"></label>
+            <label>对玩家态度<input id="ne-attitude" maxlength="200" value="${escapeHtml(String(c.attitude||""))}"></label>
+            <label>关系标签<input id="ne-tie" maxlength="120" value="${escapeHtml(String(c.tie||""))}"></label>
+            <div class="card-btns"><button class="big-btn" id="ne-save">保存修正</button><button class="big-btn ghost" id="ne-cancel">取消</button></div>
+          </div>`;
+        $("ne-cancel").onclick = ()=>{ npcEditName=""; refreshSide(); };
+        $("ne-save").onclick = ()=>{
+          const oldName = c.name;
+          const name = $("ne-name").value.trim();
+          if(!name){ alert("姓名不能为空"); return; }
+          const num = (id,min,max)=>{ const n=Number($(id).value); return Number.isFinite(n)?Math.max(min,Math.min(max,Math.round(n))):undefined; };
+          c.name = name;
+          c.gender = $("ne-gender").value.trim();
+          c.age = num("ne-age",1,200);
+          c.height = num("ne-height",30,300);
+          c.weight = num("ne-weight",2,500);
+          c.species = $("ne-species").value.trim();
+          c.identity = $("ne-identity").value.trim();
+          c.job = $("ne-job").value.trim();
+          c.appearance = $("ne-appearance").value.trim();
+          c.outfit = $("ne-outfit").value.trim();
+          c.personality = $("ne-personality").value.trim();
+          c.background = $("ne-background").value.trim();
+          c.goal = $("ne-goal").value.trim();
+          c.agenda = $("ne-agenda").value.trim();
+          c.attitude = $("ne-attitude").value.trim();
+          c.tie = $("ne-tie").value.trim();
+          if(oldName!==name){
+            S.present = (S.present||[]).map(n=>n===oldName?name:n);
+            if(S.talkTarget===oldName) S.talkTarget = name;
+            if(S.aff && oldName in S.aff){ S.aff[name]=S.aff[oldName]; delete S.aff[oldName]; }
+            if(S.intimacy && oldName in S.intimacy){ S.intimacy[name]=S.intimacy[oldName]; delete S.intimacy[oldName]; }
+            for(const p of (S.cast||[])) if(Array.isArray(p.links)) p.links = p.links.map(l=>l && l.name===oldName?{...l,name}:l);
+            for(const l of (S.openLoops||[])) if(Array.isArray(l.participants)) l.participants = l.participants.map(n=>n===oldName?name:n);
+          }
+          ensureNpcDefaults(c,S);
+          npcDetailName = name;
+          npcEditName = "";
+          saveProgress();
+          refreshSide();
+        };
+        return;
+      }
+      const detailNpc = npcDetailName ? (S.cast||[]).find(c=>c && c.name===npcDetailName && !c.dead) : null;
+      if(detailNpc){
+        const c = detailNpc;
+        const aff = S.aff?.[c.name] || 0;
+        const intim = Number.isFinite(S.intimacy?.[c.name]) ? S.intimacy[c.name] : (c.intimacy||0);
+        const tierLabel = (typeof intimacyTier==="function" && typeof INTIMACY_TIERS!=="undefined")
+          ? (INTIMACY_TIERS[intimacyTier(aff,intim)]?.label||"") : "";
+        const status = c.hp<=20 ? "重伤/虚弱" : c.hp<=50 ? "带伤" : "正常";
+        const avatarFile = c.avatar
+          ? ((typeof AVATAR_LIB!=="undefined" && AVATAR_LIB[c.avatar]) ? AVATAR_LIB[c.avatar].file : c.avatar)
+          : "";
+        const avatar = c.avatarKey
+          ? '<img class="npc-avatar" data-avatar-key="'+escapeHtml(c.avatarKey)+'" alt="">'
+          : (avatarFile
+            ? '<img class="npc-avatar" src="avatars/'+encodeURIComponent(avatarFile)+'" alt="" loading="lazy" decoding="async">'
+            : '<div class="npc-avatar npc-avatar-fallback">'+escapeHtml(String(c.name).slice(0,1))+'</div>');
+        const attrs = c.attrs ? row("智商",(c.attrs.iq??50)+"（"+attrLabel(c.attrs.iq??50)+"）")
+          +row("体质",(c.attrs.physique??50)+"（"+attrLabel(c.attrs.physique??50)+"）")
+          +row("魅力",(c.attrs.charm??50)+"（"+attrLabel(c.attrs.charm??50)+"）")
+          +row("意志",(c.attrs.willpower??50)+"（"+attrLabel(c.attrs.willpower??50)+"）")
+          +row("敏捷",(c.attrs.agility??50)+"（"+attrLabel(c.attrs.agility??50)+"）") : "";
+        const combat = c.combat ? row("武力",String(c.combat.power||0))
+          +row("内力",(c.combat.energy||0)+"/"+(c.combat.energyMax||0))
+          +row("绝技",(c.combat.techniques||[]).map(t=>t.name).join("、")||"无") : "";
+        const links = (c.links||[]).map(l=>l.name+(l.relation?("（"+l.relation+"）"):"")+(Number.isFinite(l.aff)?(" 好感"+l.aff):"")).join("；");
+        const memoriesText = (c.memories||[]).slice(-4).reverse().map(m=>"第"+(m.turn||"?")+"幕："+m.text).join("<br>");
+        body.innerHTML = '<div class="self-head">'+avatar+'<div class="self-head-info"><div class="self-name">'+escapeHtml(c.name)+'</div><div class="self-meta">'+escapeHtml([c.identity||c.job,c.species,c.age?c.age+"岁":"",c.gender].filter(Boolean).join(" · "))+'</div><button type="button" class="npc-gen" data-gen-avatar="'+escapeHtml(c.name)+'">'+(c.avatarKey?"重生成":"生成头像")+'</button></div></div>'
+          + card("基本资料", row("姓名",c.name)+row("身份",c.identity||c.job)+row("职业",c.job)
+            +row("年龄",c.age?c.age+" 岁":"未记录")+row("性别",c.gender||"未记录")
+            +row("物种",c.species||"人类")+row("出身",c.origin)
+            +row("身高",c.height?c.height+" cm":"未记录")+row("体重",c.weight?c.weight+" kg":"未记录"))
+          + card("外貌与生活", row("外貌",c.appearance)+row("衣着",c.outfit)
+            +row("作息",c.routine)+row("说话习惯",c.voice)+row("爱好",c.hobby))
+          + card("性格与动机", row("性格",c.personality)+row("背景",c.background)
+            +row("长期目标",c.goal)+row("眼下打算",c.agenda)+row("对玩家的态度",c.attitude))
+          + card("关系与状态", row("与玩家关系",[tierLabel,aff?("好感 "+aff):"",intim?("亲密 "+intim):""].filter(Boolean).join(" · "))
+            +row("与玩家关系标签",c.tie)+row("人物关系网",links)+row("状态",status+(c.dead?"":" · 体力 "+(c.hp??100)))
+            +row("财产",c.wealth)+row("随身现金",Number.isFinite(c.coin)?c.coin+" "+curName(S):"")
+            +row("声望",Number.isFinite(c.rep)?c.rep:"")+row("道德",Number.isFinite(c.moral)?c.moral:"")+row("通缉",Number.isFinite(c.wanted)?c.wanted:""))
+          + attrs + (combat ? card("武力",combat) : "")
+          + (memoriesText ? card("最近经历",'<div class="qd">'+memoriesText+'</div>') : "")
+          + '<div class="card-btns"><button class="big-btn ghost" id="npc-detail-edit">修订资料</button><button class="big-btn ghost" id="npc-detail-back">返回人物列表</button></div>';
+        body.querySelectorAll("img[data-avatar-key]").forEach(async img=>{
+          try{ const data = await imageGet(img.dataset.avatarKey); if(data) img.src = data; }catch(e){}
+        });
+        body.querySelectorAll("[data-gen-avatar]").forEach(btn=>{
+          btn.onclick = async ()=>{
+            if(btn.disabled) return;
+            const old = btn.textContent;
+            btn.disabled = true; btn.textContent = "生成中…";
+            try{ await generateNpcAvatar(btn.dataset.genAvatar); }
+            catch(e){ btn.disabled=false; btn.textContent = old; alert("生成失败："+e.message); }
+          };
+        });
+        const back = $("npc-detail-back");
+        if(back) back.onclick = ()=>{ npcDetailName = ""; refreshSide(); };
+        const edit = $("npc-detail-edit");
+        if(edit) edit.onclick = ()=>{ npcEditName = c.name; npcDetailName = ""; refreshSide(); };
+        return;
+      }
       const present = Array.isArray(S.present)
         ? card("在场人物",'<div class="qd">'+(S.present.length
             ? S.present.map(n=>'<button type="button" class="talk-chip'+((S.talkTarget===n)?" active":"")+'" data-talk="'+escapeHtml(n)+'">'+escapeHtml(n)+'</button>').join(" ")
@@ -721,23 +875,40 @@ function refreshSide(){
       const socialCards = (S.social||[]).length
         ? card("社会关系",'<div class="qd">'+S.social.map(r=>escapeHtml(r.name+(r.relation?"（"+r.relation+"）":"")+(r.power?" · "+r.power:"")+(r.attitude?" · "+r.attitude:""))).join("<br>")+'</div>')
         : "";
-      const npcCards = (S.cast||[]).filter(c=>c && c.name && !c.offstage && !c.dead).slice(0,10).map(c=>{
+      const npcCards = (S.cast||[]).filter(c=>c && c.name && !c.offstage && !c.dead && !c.group).slice(0,10).map(c=>{
         const avatarFile = c.avatar
           ? ((typeof AVATAR_LIB!=="undefined" && AVATAR_LIB[c.avatar]) ? AVATAR_LIB[c.avatar].file : c.avatar)
           : "";
         const avatar = c.avatarKey
           ? '<img class="npc-avatar" data-avatar-key="'+escapeHtml(c.avatarKey)+'" alt="">'
           : (avatarFile
-            ? '<img class="npc-avatar" src="avatars/'+encodeURIComponent(avatarFile)+'" alt="" loading="lazy">'
+            ? '<img class="npc-avatar" src="avatars/'+encodeURIComponent(avatarFile)+'" alt="" loading="lazy" decoding="async">'
             : '<div class="npc-avatar npc-avatar-fallback">'+escapeHtml(String(c.name).slice(0,1))+'</div>');
-        const meta = [c.species,c.tie,c.job,c.attitude,c.combat ? ("武力 "+c.combat.power) : ""].filter(Boolean).join(" · ");
-        return '<div class="npc-card">'+avatar+'<div class="npc-info"><div class="npc-name">'+escapeHtml(c.name)+'</div><div class="npc-meta">'+escapeHtml(meta||"…")+'</div></div><button type="button" class="npc-gen" data-gen-avatar="'+escapeHtml(c.name)+'">'+(c.avatarKey?"重生成":"生成头像")+'</button></div>';
+        const meta = [
+          c.identity || c.job,
+          Number.isFinite(c.age) && c.age>0 ? c.age+"岁" : "",
+          c.gender,
+          c.species,
+          c.tie,
+          c.attitude,
+          c.combat ? ("武力 "+c.combat.power) : ""
+        ].filter(Boolean).slice(0,5).join(" · ");
+        const desc = [c.appearance,c.outfit].filter(Boolean).join(" · ");
+        return '<div class="npc-card">'+avatar+'<div class="npc-info"><div class="npc-name">'+escapeHtml(c.name)+'</div><div class="npc-meta">'+escapeHtml(meta||"身份未明")+'</div>'+(desc?'<div class="npc-desc">'+escapeHtml(desc)+'</div>':'')+'</div><div class="npc-actions"><button type="button" class="npc-gen" data-npc-detail="'+escapeHtml(c.name)+'">详情</button><button type="button" class="npc-gen" data-gen-avatar="'+escapeHtml(c.name)+'">'+(c.avatarKey?"重生成":"生成头像")+'</button></div></div>';
+      }).join("");
+      const groupCards = (S.cast||[]).filter(c=>c && c.name && !c.dead && !c.offstage && c.group).slice(0,8).map(c=>{
+        const info = [c.identity || c.job, c.attitude, c.hp<100 ? "受挫" : ""].filter(Boolean).join(" · ");
+        return '<div class="npc-group"><b>'+escapeHtml(c.name)+'</b>'+(info?'<span>'+escapeHtml(info)+'</span>':'')+'</div>';
       }).join("");
       body.innerHTML = selfAttrs
         + (npcCards ? card("人物档案",'<div class="npc-grid">'+npcCards+'</div>') : "")
+        + (groupCards ? card("群体与势力",'<div class="npc-groups">'+groupCards+'</div>') : "")
         + socialCards + present || '<div class="empty">遇到的人物会记录在这里。</div>';
       body.querySelectorAll("img[data-avatar-key]").forEach(async img=>{
         try{ const data = await imageGet(img.dataset.avatarKey); if(data) img.src = data; }catch(e){}
+      });
+      body.querySelectorAll("[data-npc-detail]").forEach(btn=>{
+        btn.onclick = ()=>{ npcDetailName = btn.dataset.npcDetail; refreshSide(); };
       });
       body.querySelectorAll("[data-gen-avatar]").forEach(btn=>{
         btn.onclick = async ()=>{
@@ -757,6 +928,29 @@ function refreshSide(){
           catch(e){ btn.disabled=false; btn.textContent = old; alert("生成失败："+e.message); }
         };
       });
+    }else if(tab==="story"){
+      const ch = S.chapter || null;
+      const loops = (S.openLoops||[]).slice(-8).reverse();
+      const closed = (S.loopHistory||[]).slice(-5).reverse();
+      const chapterCard = ch
+        ? card("当前篇章", row("篇章", ch.title)+row("目标", ch.goal)+row("筹码与代价", ch.stakes)+row("下一步", ch.next)+row("阶段", ch.phase))
+        : card("当前篇章", '<div class="empty">还没有篇章信息。持续几幕或开启新故事后，AI 会建立当前篇章。</div>');
+      const loopCards = loops.length
+        ? card("未了事项", '<div class="loop-list">'+loops.map(l=>{
+            const ageMinutes = Number.isFinite(l.createdMinute) && Number.isFinite(S.environment?.minute)
+            ? Math.max(0,S.environment.minute-l.createdMinute) : null;
+            const age = Number.isFinite(l.createdTurn) && Number.isFinite(S.turn) ? Math.max(0,S.turn-l.createdTurn) : null;
+            const meta = [l.kind,
+              ageMinutes!==null ? ("已悬 "+formatDuration(ageMinutes)) : (age!==null?("已悬 "+age+" 幕"):""),
+              l.dueMinute ? ("约 "+formatStoryTime(l.dueMinute,S)) : (l.dueTurn?("预计第 "+l.dueTurn+" 幕"):""),
+              (l.participants||[]).join("、")].filter(Boolean).join(" · ");
+            return '<div class="loop-row"><span class="loop-text">'+escapeHtml(l.text||"")+'</span>'+(meta?'<span class="loop-meta">'+escapeHtml(meta)+'</span>':'')+'</div>';
+          }).join("")+'</div>')
+        : card("未了事项", '<div class="empty">当前没有未了事项。</div>');
+      const closedCards = closed.length
+        ? card("最近收回", '<div class="qd">'+closed.map(l=>escapeHtml(l.text||"")+" · 第"+(l.resolvedTurn||"?")+"幕").join("<br>")+'</div>')
+        : "";
+      body.innerHTML = chapterCard + loopCards + closedCards;
     }else{
       const itemCards = S.items.length
         ? card("物品与线索",'<div class="item-list">'+S.items.map((it,i)=>{
@@ -933,6 +1127,68 @@ const CAREERS = {
     identity:"一个普通人", standing:"没人特别注意你，这有时反而是好事。" }
 };
 
+const START_ATTR_KEYS = ["iq","physique","charm","willpower","agility"];
+const START_ATTR_LABELS = {iq:"智商",physique:"体质",charm:"魅力",willpower:"意志",agility:"敏捷"};
+
+function normalizeStartAttrs(value){
+  if(!value || typeof value!=="object" || Array.isArray(value)) return null;
+  const out = {};
+  for(const key of START_ATTR_KEYS){
+    const n = Number(value[key]);
+    if(Number.isFinite(n)) out[key] = clamp(Math.round(n),10,90);
+  }
+  return Object.keys(out).length===START_ATTR_KEYS.length ? out : null;
+}
+
+function rollStartingAttrs(){
+  const out = {};
+  for(const key of START_ATTR_KEYS) out[key] = clamp(50 + Math.round((Math.random()*2-1)*8),25,75);
+  return out;
+}
+
+/* 职业开局属性：先给一点个体差异，再叠加职业加成，避免所有人都是 50 起步 */
+function startingAttrsForCareer(careerId){
+  const c = CAREERS[careerId];
+  const out = rollStartingAttrs();
+  for(const [key,value] of Object.entries(c?.bonus||{})){
+    if(Number.isFinite(value)) out[key] = clamp((out[key]??50) + value, 0, 100);
+  }
+  return out;
+}
+
+/* 原著角色开局属性：优先用角色卡/故事圣经里的 attrs，否则按身份与性格推断 */
+function inferRoleAttrs(role){
+  const explicit = normalizeStartAttrs(role?.attrs);
+  if(explicit && new Set(Object.values(explicit)).size>1) return explicit;
+  const text = [role?.name,role?.identity,role?.personality,role?.appearance,role?.outfit,role?.origin,role?.desc]
+    .filter(Boolean).join(" ");
+  const out = rollStartingAttrs();
+  const add = (key,value)=>{ out[key] = clamp((out[key]??50) + value, 10, 90); };
+  const rules = [
+    [/武|将|兵|侠|镖|杀手|刺客|猎|剑|刀|拳|佣兵|护院|捕快|军|战|骑士|忍者|守卫/, {physique:12,agility:8,willpower:5,iq:-2}],
+    [/书生|文|学士|秘书|账房|医|儒|道士|老师|记者|侦探|研究|科学家|工程师|学生|谋士|军师/, {iq:12,willpower:4,physique:-8,agility:-2}],
+    [/商|掌柜|老板|富|贵族|公子|小姐|名妓|交际|伶人|演员|外交|官|经理|主持人/, {charm:12,iq:3,physique:-4}],
+    [/盗|贼|斥候|探子|间谍|游侠|猎|斥|斥候|斥|偷|刺客|斥/, {agility:12,iq:4,willpower:2,physique:-2}],
+    [/僧|神职|祭|巫|苦修|隐士|修士|牧师|修女|萨满|先知/, {willpower:12,iq:4,physique:-4}],
+    [/农|工|匠|水手|脚夫|矿工|搬|体力|仆|厨|车夫|船夫/, {physique:8,willpower:4,charm:-2}]
+  ];
+  let matched = false;
+  for(const [re,bonus] of rules){
+    if(!re.test(text)) continue;
+    matched = true;
+    for(const [key,value] of Object.entries(bonus)) add(key,value);
+    break;
+  }
+  if(!matched){
+    const keys = START_ATTR_KEYS.slice();
+    const strong = keys.splice(Math.floor(Math.random()*keys.length),1)[0];
+    const weak = keys[Math.floor(Math.random()*keys.length)];
+    add(strong,8);
+    add(weak,-6);
+  }
+  return out;
+}
+
 /* 技能等级描述，用于展示与判定参考 */
 function skillLevel(v){
   if(v>=80) return "大师";
@@ -984,10 +1240,8 @@ function applyCareer(careerId){
   const c = CAREERS[careerId];
   if(!c) return;
   S.career = careerId;
-  const base = { iq:50, physique:50, charm:50, willpower:50, agility:50 };
-  for(const [k,v] of Object.entries(c.bonus||{})){
-    S[k] = clamp((S[k]??base[k]??50) + v, 0, 100);
-  }
+  const attrs = startingAttrsForCareer(careerId);
+  for(const key of START_ATTR_KEYS) S[key] = attrs[key];
   S.hpMax = clamp(Math.round(80 + (S.physique||50)*0.4), 40, 140);
   S.hp = S.hpMax;
   S.skills = {...(c.skills||{})};

@@ -97,6 +97,8 @@ document.querySelectorAll(".side-tab").forEach(tab=>{
   tab.onclick = ()=>{
     document.querySelectorAll(".side-tab").forEach(t=>t.classList.remove("active"));
     tab.classList.add("active");
+    npcDetailName = "";
+    npcEditName = "";
     refreshSide();
   };
 });

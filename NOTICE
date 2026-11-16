@@ -5,6 +5,7 @@ This repository contains only the engine code for the Tavern project.
 - No novels, story bibles, EPUB/PDF files, screenshots, saves, or API keys are included.
 - User-imported texts and AI-generated content remain the property of their respective rights holders.
 - Optional Android packaging uses Capacitor (MIT License); Capacitor is not bundled in this repository.
+- Optional local semantic memory uses `BAAI/bge-small-zh-v1.5` (MIT License) converted to ONNX by the Xenova project, plus `@xenova/transformers` (Apache-2.0) and ONNX Runtime Web (MIT License). Model and runtime files are under `models/` and `vendor/` for offline local inference.
 - The project name and UI text are for identification only. No third-party trademarks are claimed.
 
 If you add third-party code, fonts, images, or sample texts, record their source and license here.
