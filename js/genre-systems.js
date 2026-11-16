@@ -61,6 +61,7 @@ function genreChoices(state){
     return [
       ...(!game.signaled && game.energy>=2 ? [make("signal","给"+game.name+"的通讯设备供电","消耗 2 格可用能源，发出求援或联络信号")] : []),
       ...(!game.reserve && !game.returned && game.energy>=3 ? [make("reserve","留出 3 格能源用于返程","这部分能源将留给返程")] : []),
+      ...(game.reserve>0 ? [make("unreserve","解除返程能源预留","剩余储备回到可用能源，返程前可再分配")] : []),
       ...(game.route && !game.modified && game.energy>=2 && game.parts>=1 ? [make("upgrade","改装"+game.name+"以开辟「"+game.route+"」","消耗 2 格能源和 1 份零件")] : []),
       ...(game.modified && !game.crossed && game.energy>=1 ? [make("cross","试走改装后开启的「"+game.route+"」","消耗 1 格可用能源")] : []),
       ...(game.reserve>=3 && !here ? [make("return","启用返程储备，返回「"+game.place+"」","消耗 3 格返程能源")] : [])
@@ -234,8 +235,9 @@ function settleGenreMove(game,move,scene,environment,turn){
   if(!move || move.blocked || !scene.genreData.done) return "";
   const {kind,subject}=move;
   if(game.system==="科幻"){
+    const allocation = allocateReturnEnergy(game,kind);
+    if(allocation) return allocation;
     if(kind==="signal"){ game.energy-=2; game.signaled=true; return "通讯设备已通电，消耗 2 格能源。"; }
-    if(kind==="reserve"){ game.energy-=3; game.reserve=3; return "已留出 3 格返程能源。"; }
     if(kind==="upgrade"){ game.energy-=2; game.parts--; game.modified=true; return "改装已完成，可试走「"+game.route+"」。"; }
     if(kind==="cross" && environment.place===game.route){game.energy--; game.crossed=true; return "已抵达「"+game.route+"」。";}
     if(kind==="return" && environment.place===game.place){game.reserve-=3; game.returned=true; return "已使用返程储备，返回「"+game.place+"」。";}
@@ -264,6 +266,35 @@ function settleGenreMove(game,move,scene,environment,turn){
     else game.attention.push({party:power.party,count:1});
   }
   return "已使用「"+power.name+"」· "+fantasyCost(power);
+}
+
+function allocateReturnEnergy(game,kind){
+  if(kind==="reserve" && !game.reserve && !game.returned && game.energy>=3){
+    game.energy-=3;
+    game.reserve=3;
+    return "已留出 3 格返程能源。";
+  }
+  if(kind==="unreserve" && game.reserve>0){
+    const amount=game.reserve;
+    game.energy+=amount;
+    game.reserve=0;
+    return "返程预留已解除，"+amount+" 格能源回到可用能源。";
+  }
+  return "";
+}
+
+function settleLocalGenreChoice(state,choice){
+  if(!state.turn || state.ending || state.genreGame?.system!=="科幻" || !choice
+    || choice.idle || choice.endingRequest) return null;
+  const options=genreChoices(state).filter(option=>["reserve","unreserve"].includes(option.genreMove.kind));
+  const option=options.find(o=>o.text===(choice.text||"").trim().replace(/[。！!]$/,"")
+    && (!choice.genreMove || choice.genreMove.kind===o.genreMove.kind));
+  if(!option) return null;
+  const game={...state.genreGame};
+  const text=allocateReturnEnergy(game,option.genreMove.kind);
+  if(!text) return null;
+  game.history=[...game.history,{turn:state.turn,text}].slice(-24);
+  return {game,text};
 }
 
 function settleGenreGame(state,scene,choice,move,environment,present,turn){
@@ -297,7 +328,8 @@ function settleGenreGame(state,scene,choice,move,environment,present,turn){
     const labels={rations:"口粮",medicine:"药品",energy:"能源",parts:"零件"};
     const gains=[];
     for(const key of keys){
-      const amount=Math.min(find[key]||0,100-game[key]);
+      const reserved=system==="科幻" && key==="energy" ? game.reserve : 0;
+      const amount=Math.min(find[key]||0,100-reserved-game[key]);
       if(amount>0){game[key]+=amount;gains.push((system==="奇幻" ? "魔力" : labels[key])+" +"+amount);}
     }
     if(gains.length){game.found.push(find.source);notices.push(find.source+" · "+gains.join("，"));}

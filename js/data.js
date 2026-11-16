@@ -99,6 +99,7 @@ const DEFAULT_STATE = () => ({
   incomePlan: {type:"none",amount:0,payday:1,source:"",sharedWith:""}, // 收入方式
   expensePlans: [],
   lastTimeSettlement: null,
+  llmMetrics: [],
   savings: null,   // 存款（与手头现金分开；未知时为 null，由 AI 按身份/家境给出）
   economyMode: "",
   moneyBook: [],
@@ -194,6 +195,7 @@ const DEFAULT_STATE = () => ({
   genreGame: null,
   idleTimeout: 90,   // 玩家沉默多久（秒）触发超时推进
   idleCount: 0,      // 已发生的超时次数（AI 内部，用于累积后果）
+  idlePaused: false, // 连续两次无回应后暂停自动推进，等待玩家回来
   noNagUntil: 0,     // 「拒绝冷却」：在此幕之前，AI 不得再提玩家拒绝过的请求
   afterglow: 0,      // 亲密余韵剩余幕数：期间不谈正事、不复盘任务
   intimateActive: false, // 亲密场景是否正在进行（上一幕未结束）
@@ -656,7 +658,8 @@ function refreshStats(){
                     : "linear-gradient(90deg,var(--red),#e07050)";
   const status = $("world-status");
   const env = S.environment;
-  status.textContent = S.ai ? [formatClock(S),env.place,env.weather,"时间线："+timelineLabel(S)].filter(Boolean).join(" · ")
+  const place = env.place || S.scene || S.chapter?.title || "";
+  status.textContent = S.ai ? [formatClock(S),place,env.weather,"时间线："+timelineLabel(S)].filter(Boolean).join(" · ")
     : formatStoryTime(env.minute,S);
   status.hidden = !status.textContent;
 }
@@ -1061,7 +1064,7 @@ function refreshSide(){
         +(c.status==="happened" ? row("后续",c.followUp) : row("后续",c.avertedReason))
       )).join("");
       const env = S.environment;
-      const conditions = row("时间",formatClock(S))+row("地点",env.place)
+      const conditions = row("时间",formatClock(S))+row("地点",env.place||S.scene||S.chapter?.title)
         +row("季节",S.weatherState?.season)+row("天气",env.weather)+row("现场情况",env.conditions);
       const local = locationProfile(S);
       const background = row("时代与地区",env.era)+row("背景",env.background)

@@ -979,10 +979,11 @@ const GENRE_CONFLICT_PROFILES = {
   "科幻": { label:"科幻", beat:"系统故障、协议与权限、公司利益、舰船或殖民地资源、外星接触的规则", avoid:"不要用古代家务或纯闲聊推进；冲突要来自技术、制度、资源或未知文明的具体规则。" },
   "恐怖": { label:"恐怖", beat:"未知威胁的迹象、环境压迫、信任崩塌、生存资源减少、不可名状的代价", avoid:"不要用轻松日常、流言或路人求助稀释恐怖；恐怖要有可追踪的迹象并逐步升级。" },
   "末日": { label:"末日", beat:"物资短缺、感染或污染、据点防线、队伍分裂、天气与废墟中的威胁", avoid:"不要用无关家务或稳定日常当主线；每个事件都应消耗、改变或争夺生存资源。" },
-  "日常": { label:"日常", beat:"工作、家庭、邻里、金钱压力或关系里的真实变化", avoid:"可以琐碎，但必须推动关系、选择或下一步；不要只写无意义的打断和重复寒暄。" },
+  "日常": { label:"日常", beat:"关系里的真实变化、生活细节、人物心情、习惯与小选择", avoid:"可以琐碎，但优先关系和日常质感；不要用送货车、搬东西、邻居求助、工作、账单或催婚连续制造事件，两幕内最多一个轻钩子。" },
   "随机": { label:"随机", beat:"当前世界已建立的核心规则、人物利益与叙事骨架", avoid:"先按已出现的人物、地点和类型判断冲突来源，不要用与故事无关的日常琐事填时间。" }
 };
 function genreConflictProfile(state){
+  if(state.genre==="日常") return GENRE_CONFLICT_PROFILES["日常"];
   if(isRomanceMode(state)) return { label:"恋爱", beat:"心动、试探、坦白、承诺、失约、旧伤、共同经历、和解或离别", avoid:"不要用房租、账单、算账、买菜、邻居闲话、世俗眼光、流言蜚语、催婚逼婚当反复出现的主要事件。" };
   if(state.genre && GENRE_CONFLICT_PROFILES[state.genre]) return GENRE_CONFLICT_PROFILES[state.genre];
   const t = state.storyTemplate && state.storyTemplate.id;
@@ -993,6 +994,16 @@ function genreConflictProfile(state){
 function genreConflictLine(state){
   const p = genreConflictProfile(state);
   return "【类型冲突】本故事按「"+p.label+"」设置冲突：事件应来自"+p.beat+"。"+p.avoid+"冲突要接在已发生的人物、地点和选择上，并改变玩家眼前的目标或关系。";
+}
+function genrePlaybookLine(state){
+  const rules = {
+    "恐怖": "避免把恐怖写成固定套路：不要反复用「黑影+指甲刮擦+突然跳脸/怪物扑出」。优先用环境异常（温度、气味、光线、物件位置、时间错位）、规则禁忌（不能回头、不能应声、必须留灯、不能说出名字）、缺席感（人不见了但生活痕迹继续）和声音方向错误。威胁每 2~3 幕只升级一类，留下可追踪的迹象和可推断的规则；让玩家通过观察与选择理解规则，不靠血腥或 jump scare 堆砌。",
+    "悬疑": "每幕最多新增 1~2 条真正被玩家发现或验证的线索，不要连续两幕各塞 3~5 条。每条线索写清来源、可核查方式和可信度；证词可能撒谎、记录可能缺失、物证可能被摆弄，未验证的只是说法，不能当事实。优先让玩家验证、比对、对质，再给新线索；不要用旁白直接揭晓答案。",
+    "日常": "本类型以关系、生活细节和人物心情为主。不要用送货车、搬东西、邻居求助、工作、账单或催婚等外部钩子连续推动剧情；两幕内最多一个轻钩子，其余交给相处、习惯、空间、饮食、天气和小选择。冲突可以从关系或生活细节里自然长出，但不要两幕就堆事件。",
+    "武侠": "交锋结果必须由双方武力、相关技能、属性、准备和伤势决定，不能只写气氛；每次交锋至少让一项属性或技能实际影响成败或代价。体力损失按结果、招式和防御结算，不要固定扣 6 点。"
+  };
+  const text = rules[genreConflictProfile(state).label];
+  return text ? "【类型执行规则】"+text : "";
 }
 function genreMoralityLine(state){
   if(isRomanceMode(state)){
@@ -1918,6 +1929,7 @@ function pruneStateForSave(state){
   save.consequences = (state.consequences||[]).slice(-40);
   save.anchors = (state.anchors||[]).slice(-24);
   save.sceneHistory = (state.sceneHistory||[]).slice(-8);
+  save.llmMetrics = (state.llmMetrics||[]).slice(-12);
   delete save.npcEnrichPending;
   delete save.filteredSpeakers;
   return save;

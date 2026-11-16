@@ -1,4 +1,4 @@
-"use strict";
+﻿"use strict";
 function snapshotState(state){
   try{
     return typeof structuredClone === "function" ? structuredClone(state) : JSON.parse(JSON.stringify(state));
@@ -51,7 +51,8 @@ function undoStory(){
   const previous = undoStack.pop();
   if(!previous) return;
   clearIdleTimer();
-  const sharedTurn = (S.timelines||[]).some(t=>t.parentId===S.timelineId && t.branchTurn>=S.turn);
+  const changedTurn = previous.turn!==S.turn;
+  const sharedTurn = changedTurn && (S.timelines||[]).some(t=>t.parentId===S.timelineId && t.branchTurn>=S.turn);
   if(sharedTurn){
     if(!saveTimelineSnapshot(S)){
       undoStack.push(previous);
@@ -61,7 +62,7 @@ function undoStory(){
     previous.timelines = S.timelines.map(t=>({...t}));
     createTimelineBranch(previous,"撤销后续玩",false);
     undoStack = [];
-  }else if(typeof dbDeleteTurn==="function" && typeof tavernWorldId==="function"){
+  }else if(changedTurn && typeof dbDeleteTurn==="function" && typeof tavernWorldId==="function"){
     dbDeleteTurn(tavernWorldId(S),S.turn,S.timelineId).catch(()=>{});
   }
   S = previous;
@@ -71,8 +72,44 @@ function undoStory(){
   syncUndoButton();
   imageToast(sharedTurn ? "已撤销一步，并保留原时间线与分支。" : "已撤销一步剧情。",2500);
 }
+
+function rememberUndoState(previous){
+  if(!previous) return;
+  undoStack.push(previous);
+  if(undoStack.length>UNDO_LIMIT) undoStack.shift();
+}
+
+function commitLocalGenreChoice(choice,result){
+  rememberUndoState(snapshotState(S));
+  const entries=[{t:"action",text:"你选择了："+choice.text},{t:"sys",text:result.text}];
+  S={...S,genreGame:result.game,log:[...S.log,...entries].slice(-120)};
+  entries.forEach(logToDOM);
+  limitLog();
+  showCurrentScene();
+  syncUndoButton();
+  return saveProgress();
+}
+
+function trimStoryMessages(messages,recent,budget){
+  const removable = recent.slice(0,-2);
+  const removed = new Set();
+  let count=messages.length;
+  let length=messages.reduce((sum,msg)=>sum+String(msg.content||"").length,0);
+  while(removable.length && (count>26 || length>budget)){
+    for(const old of removable.splice(0,2)){
+      if(!messages.includes(old) || removed.has(old)) continue;
+      removed.add(old);
+      count--;
+      length-=String(old.content||"").length;
+    }
+  }
+  return messages.filter(msg=>!removed.has(msg));
+}
+
 async function aiTurn(choice){
   if(activeTurn) return;
+  const localChoice=settleLocalGenreChoice(S,choice);
+  if(localChoice) return commitLocalGenreChoice(choice,localChoice);
   if(!S.turn && !choice && !S.career && S.playerIdentity){
     applyCareer("commoner");
   }
@@ -92,6 +129,7 @@ async function aiTurn(choice){
   const turn = {controller,automaticOpening:!S.turn && !choice};
   activeTurn = turn;
   const state = {...S, aff:{...S.aff}, intimacy:{...(S.intimacy||{})}};
+  if(choice && !choice.idle){ state.idlePaused = false; state.idleCount = 0; }
   const playerName = String(state.playerIdentity?.name || state.worldRole?.name || "").trim();
   const nextTurn = state.turn+1;
   // 玩家明确想独处时，给几幕清静：NPC 不来敲门、不「恰好路过」、不托人带话
@@ -119,13 +157,18 @@ async function aiTurn(choice){
   const soloActive = (state.soloUntil||0) >= nextTurn;
   const timeSkip = readTimeSkip(playerAction, state);
   const skipLabel = timeSkip && timeSkipText(timeSkip);
+  if(timeSkip && !confirm("检测到时间跳跃：" + skipLabel + "。\n是否推进时间？")){
+    if(activeTurn===turn) activeTurn = null;
+    showCurrentScene(playerAction);
+    return;
+  }
   state.worldWindow = advanceWorldWindow(state, nextTurn);
   const localCombat = localCombatResolution(state, playerAction, nextTurn);
   if(localCombat) state.combat = {...state.combat, energy:localCombat.energyAfter};
   const keyScene = !!localCombat || !state.turn || !!choice?.endingRequest || state.intimateActive
     || (state.afterglow||0)>0 || (state.hiddenQuest && state.hiddenQuest.final)
     || (state.hp||100)<=20 || ((state.desires&&state.desires.sex)||0)>=70;
-  const outputBudget = keyScene ? 1800 : 1200;
+  const outputBudget = choice?.endingRequest ? 4400 : keyScene ? 3600 : 2600;
     const dueNow = Number.isFinite(state.environment?.minute) ? state.environment.minute : 8*60;
     const due = state.consequences.filter(c=>c.status==="pending"
       && (Number.isFinite(c.dueMinute) ? c.dueMinute<=dueNow : c.due<=nextTurn));
@@ -270,6 +313,7 @@ async function aiTurn(choice){
     const agencyNudge = npcAgencyPrompt(state);
     const chapterNudge = chapterLoopPrompt(state);
     const repeatNudge = repetitionPrompt(state);
+    const voiceNudge = characterVoicePrompt(state);
     const dbMemory = typeof retrieveRelevantMemory==="function"
       ? await retrieveRelevantMemory(state,playerAction,choice?.target) : "";
     if(activeTurn!==turn || controller.signal.aborted) return;
@@ -277,16 +321,23 @@ async function aiTurn(choice){
     const currentPeople = memoryPeople(state,playerAction,choice?.target);
     const plannedActions = pendingNpcActions(state.openLoops,state.cast,anticipatedMinute).filter(l=>
       currentPeople.has(l.npcAction.who) || (l.knownBy||[]).some(n=>currentPeople.has(n)));
-    const baseMessages = [
-      {role:"system",content:buildSystemPrompt(state,fullContext)},
-      {role:"system",content:[buildMemoryContext(state,due,playerAction,choice?.target),reactionPrompt,
+    const labelPrompt = (label,message)=>{
+      if(message && typeof message==="object"){
+        try{ Object.defineProperty(message,"__metricLabel",{value:label,enumerable:false,configurable:true}); }catch(e){}
+      }
+      return message;
+    };
+    const collectedMessages = [
+      labelPrompt("system",{role:"system",content:buildSystemPrompt(state,fullContext)}),
+      labelPrompt("context",{role:"system",content:[buildMemoryContext(state,due,playerAction,choice?.target),reactionPrompt,
+        npcProfilePrompt(state,choice),
         investigationPrompt(state,inquiry,playerAction,choice?.target),
         genreSystemContext(state,genreMove,choice,(timeSkip||waitMinutes) ? anticipatedMinute : undefined)]
-        .filter(Boolean).join("\n")},
-      ...(dbMemory ? [{role:"system",content:dbMemory}] : []),
-      {role:"system",content:"【角色承诺】当 NPC 在剧情里明确答应独自办一件小事，并且期限确定，用 loopsAdd 的 npcAction:{who,text} 与 dueInMinutes 记录届时自行发生的具体行动。text 只写 NPC 的行动，不能替玩家答应、付款、领奖或离开。按真实进度才填 loopsDone。"
-        +(plannedActions.length ? " 本幕预计到期，只有实际跨过期限时才承接结果："+plannedActions.map(l=>l.id+" "+l.npcAction.who+"："+l.npcAction.text).join("；")+"。" : "")},
-      {role:"system",content:buildStateContext(state,Boolean(choice))},
+        .filter(Boolean).join("\n")}),
+      ...(dbMemory ? [labelPrompt("memory",{role:"system",content:dbMemory})] : []),
+      labelPrompt("loops",{role:"system",content:"【角色承诺】当 NPC 在剧情里明确答应独自办一件小事，并且期限确定，用 loopsAdd 的 npcAction:{who,text} 与 dueInMinutes 记录届时自行发生的具体行动。text 只写 NPC 的行动，不能替玩家答应、付款、领奖或离开。按真实进度才填 loopsDone。"
+        +(plannedActions.length ? " 本幕预计到期，只有实际跨过期限时才承接结果："+plannedActions.map(l=>l.id+" "+l.npcAction.who+"："+l.npcAction.text).join("；")+"。" : "")}),
+      labelPrompt("state",{role:"system",content:buildStateContext(state,Boolean(choice))}),
       ...(localCombat ? [{role:"system",content:localCombat.prompt}] : []),
       ...(isTwoDayTrial(state) ? [{role:"system",content:
         "按《桥头客栈的两天》的固定时间和人物作息推进。已订房在关柜后仍有效，未订房须等开柜或另想办法。"
@@ -304,7 +355,7 @@ async function aiTurn(choice){
         +"。其他圈子的记录："+JSON.stringify((state.reputations||[]).slice(-10))
         +"。只让有消息来源的人根据口碑改变反应。"},
       ...(!state.turn && speech ? [{role:"system",content:opener+" 在同一幕交代开场，并让角色直接回应玩家的台词。"}] : []),
-      ...recent,
+      ...recent.map(message=>labelPrompt(message.role==="assistant" ? "history-assistant" : "history-user",message)),
       ...(state.lastProse ? [{role:"system",content:"注意：你上一条回复没有使用规定的 JSON 格式，而是写了散文或编号列表。请务必只输出一个 JSON 对象（含 narration、beats、choices、plot 等字段），不要输出任何 JSON 之外的文字或 markdown 标题。"}] : []),
       ...(state.stallCount >= 2 && !isRomanceMode(state) && !(state.afterglow>0) && !state.intimateActive ? [{role:"system",content:"节奏提醒：最近已连续 " + state.stallCount + " 幕主线几乎没有实质推进，剧情正在拖沓。本幕必须让主线发生具体变化——揭示一条关键线索、制造新的阻碍或反转、逼近的期限，或逼玩家做出有代价的抉择；收束无关闲谈与重复对峙，让故事果断向前。把 plot.next 写成真正新的下一步，不要只是复述旧目标。"}] : []),
       ...(state.hiddenNextPending ? [{role:"system",content:"隐藏主线进入新阶段：上一阶段（第" + (state.hiddenStage||1) + "阶段）已完成。请在本幕自然开启下一阶段——用 hiddenQuest 提供新的 title / desc / stakes / reward，status 设为 active，承接上阶段的线索与后果并抬高筹码；不要复用旧阶段，也不要让玩家看出这些是「任务」。若剧情已到高潮收束，可令最终阶段 final=true 并在结束时给出结局。"}] : []),
@@ -325,57 +376,37 @@ async function aiTurn(choice){
       ...(agencyNudge ? [agencyNudge] : []),
       ...(chapterNudge ? [chapterNudge] : []),
       ...(repeatNudge ? [repeatNudge] : []),
+      ...(voiceNudge ? [voiceNudge] : []),
       ...(soloActive ? [{role:"system",content:"玩家现在想一个人待着 / 独自查案：本幕不要安排任何人来敲门、送东西、传话、在门外守着或「恰好路过」；也不要用脚步、叹息、影子暗示有人在附近。在场的人若识趣，可以让他们离开（用 left）。只写玩家自己的行动、环境与发现。除非性命攸关的急事，才可让人出现，并说明为何非打断不可。"}] : []),
       ...(timeSkip ? [{role:"system",content:"玩家要求推进 "+skipLabel+"。概括期间的局势、关系和身份变化，再写抵达新日期后的处境。系统按日历推进，自动结算任务之外的固定收入、租约、到期和已设开销。不要猜测收支合计，也不要把同一笔再填入 moneyMoves。"}] : []),
       ...(isRomanceMode(state) ? [{role:"system",content:"恋爱类型额外规则：不要把房租、账单、算账、买菜、邻居闲话、世俗眼光、流言蜚语、催婚逼婚当作反复出现的主要事件或固定反派；这些至多是一句背景。恋爱故事的事件应推进关系本身——心动、试探、坦白、承诺、失约、旧伤、共同经历、和解或离别。不要为了制造冲突把玩家拽去处理外部事务。"}] : []),
       ...(state.infiniteMode ? [{role:"system",content: beatReady ? storyBeatPrompt(state,stageMinutes) : storyCalmPrompt(state)}] : []),
       ...(state.infiniteMode ? [{role:"system",content:"无限模式：这段故事没有预设终点。除非玩家主动要求结束，否则不要输出 end，也不要用主线完成、原作结局、通缉或力竭来收束。主线走完或明显偏离时，顺势开启新的局部目标、事件、地点或人物，让故事自然延续；旧角色可以离场并不再回来，长期不出现的人标记 offstage，不再主动回来；只有在剧情节拍到达、题材需要且玩家没有在安静相处时，才让新角色加入；不要为了换人而换人。长期稳定关系（高好感、高亲密、家人、伴侣、长期盟友、宿敌、死对头、长期对手、债主、上司）不适用自动退场：他们可以暂时不在场、在忙自己的事，但不会因为几幕没出现就消失，也不会被新角色顶替。只在剧情节拍到达或玩家主动推动时引入新事件；安静相处的时间不是流水账，不要用房租、账单、流言或路人琐事硬填。建立新篇章时必须同时留下 1~3 条伏笔（hint/conflict/basis），并在 2~5 个故事小时内推进或回收；伏笔要建立在已发生的事实、人物或地点上，不要凭空发明无关设定。"}] : []),
-      ...(choice && choice.endingRequest ? [{role:"system",content:"玩家主动要求结束故事。本幕只写收束：把当前主线、关系和未了之事交代清楚，并在 JSON 的 end 字段返回 {good:true/false,title,text}；不要输出后续 choices，不要开启新钩子。结局必须基于本局实际发生的事，不要照搬原著结局。"}] : []),
+      ...(choice && choice.endingRequest ? [{role:"system",content:"玩家主动要求结束故事。这是最后一幕，必须从玩家当前所处的场景、刚刚发生的动作和本局已经成立的事件收束，不能跳到原著临近结局的位置，不能预写尚未发生的新篇章，也不要拿原著的后续情节替代本局结局。把当前主线、关系和未了之事交代清楚，并在 JSON 的 end 字段返回 {good:true/false,title,text}；不要输出后续 choices，不要开启新钩子。结局必须基于本局实际发生的事和玩家此前的选择。"}] : []),
       ...(drivePress ? [drivePress] : []),
       ...((state.intimateActive || state.afterglow>0 || (((state.desires&&state.desires.sex)||0)>=45 && /亲吻|吻|抱住|搂|抚摸|摸|解开|脱下|贴紧|贴身|上床|胸前|腰|腿间|身体/.test((choice&&choice.text)||""))) ? [{role:"system",content:"亲密已经进行中，或双方早已明确愿意：不要再问「可以吗 / 要不要 / 你确定吗 / 要我继续吗」这类问题，也不要停下来征求同意；直接写动作、身体状态与进展，并明确是尚未释放还是已经释放。只有玩家明确说停或表现犹豫时才停。"}] : []),
       ...((state.afterglow>0 || state.intimateActive) ? [{role:"system",content:"你们刚刚（或正在）亲密，仍处在余韵里。本幕不要突然谈任务、委托或推进主线；先写身体的疲惫、情绪的余温与相处（喘息、发软、犯困、黏人、沉默、满足或后悔），让这一场自然收尾或继续，等余韵过去再谈别的事。NPC 此刻是被欲望与疲惫影响的人，不是随时能公事公办的机器。"}] : []),
-      action
+      labelPrompt("action",action)
     ];
     if(state.filteredSpeakers) delete state.filteredSpeakers;
-    const corrective = {role:"system",content:"上一次的输出不可用（可能是 JSON 格式错误或不完整，或缺少 plot 主线 / choices 选项 / beats 台词）。请严格只输出一个完整的 JSON 对象，以 { 开头、} 结尾，包含 narration / beats / choices / plot / effects / advance 等字段；不要输出任何解释、Markdown 代码块、标题或编号列表。"};
+    const corrective = choice?.endingRequest
+      ? {role:"system",content:"上一次的结局输出不可用。请只返回一个完整 JSON 对象，以 { 开头、} 结尾，包含 narration / beats / end；end 必须是 {\"good\":true或false,\"title\":\"结局标题\",\"text\":\"结局正文\"}。不要返回 choices，不要写下一幕、新钩子或原著临近结局的原文。必须从玩家当前幕的处境和已经发生的事件收束。"}
+      : {role:"system",content:"上一次的输出不可用（可能是 JSON 格式错误或不完整，或缺少 plot 主线 / choices 选项 / beats 台词）。请严格只输出一个完整的 JSON 对象，以 { 开头、} 结尾，包含 narration / beats / choices / plot / effects / advance 等字段；不要输出任何解释、Markdown 代码块、标题或编号列表。"};
     let raw, scene, lastErr, environment, money, calculatedStamina;
-    // 服务端最多接受 28 条消息，预留重试时的两条纠正指令。
-    if(baseMessages.length>26 && recent.length){
-      const overflow = Math.ceil((baseMessages.length-26)/2)*2;
-      baseMessages.splice(baseMessages.indexOf(recent[0]),overflow);
-    }
-    // 字符预算：超长时优先丢最早的历史回合，保留系统规则、最近对话与本幕行动
-    {
-      const budget = (typeof storyDetailFull==="function" && storyDetailFull())
-        ? (memoryFirst ? 36000 : 42000)
-        : (memoryFirst ? 26000 : 32000);
-      const totalChars = ()=>baseMessages.reduce((n,m)=>n+String(m?.content||"").length,0);
-      let over = totalChars() - budget;
-      if(over>0 && recent.length>2){
-        const start = baseMessages.indexOf(recent[0]);
-        let drop = Math.min(recent.length-2, Math.ceil(over/900)*2);
-        if(start>=0 && drop>0) baseMessages.splice(start,drop);
-      }
-      // 仍然超预算时，压缩较早的非系统消息正文，保留最近行动
-      if(totalChars()>budget){
-        for(const m of baseMessages){
-          if(totalChars()<=budget) break;
-          if(!m || m.role==="system") continue;
-          if(String(m.content||"").length>600) m.content = String(m.content).slice(0,600)+"……";
-        }
-      }
-    }
-    for(let attempt=0; attempt<2; attempt++){
+    const budget = storyDetailFull() ? (memoryFirst ? 36000 : 42000) : (memoryFirst ? 24000 : 28000);
+    const baseMessages = trimStoryMessages(collectedMessages,recent,budget);
+    const maxAttempts = choice?.endingRequest ? 3 : 2;
+    for(let attempt=0; attempt<maxAttempts; attempt++){
       const messages = attempt===0 ? baseMessages : [...baseMessages.slice(0,-1), corrective,
         ...(lastErr?.message ? [{role:"system",content:"还需纠正："+lastErr.message}] : []),
         baseMessages[baseMessages.length-1]];
             try{
         raw = await callLLM(messages, AbortSignal.any([controller.signal,AbortSignal.timeout(120000)]), text=>{
           if(activeTurn===turn) streamPreview(text);
-        }, {temperature: attempt===0 ? 0.95 : 0.7, maxTokens: attempt===0 ? outputBudget : 1800});
+        }, {temperature: attempt===0 ? 0.95 : 0.7, maxTokens: attempt===0 ? outputBudget : Math.min(6000,Math.max(3000,outputBudget+1200)), turn:nextTurn, label:attempt===0 ? "scene" : "retry"});
       }catch(err){
         lastErr = err;
-        if(attempt===1 || activeTurn!==turn || controller.signal.aborted || err.name==="AbortError") throw err;
+        if(attempt===maxAttempts-1 || activeTurn!==turn || controller.signal.aborted || err.name==="AbortError") throw err;
         const pv = $("stream-preview");
         if(pv) pv.textContent = "连接中断或超时，正在重试……";
         continue;
@@ -385,9 +416,16 @@ async function aiTurn(choice){
         scene = readScene(raw);
       }catch(err){
         lastErr = err;
-        if(attempt===1) throw err;
+        if(attempt===maxAttempts-1) throw err;
         const pv = $("stream-preview");
         if(pv) pv.textContent = "正在重新生成剧情……";
+        continue;
+      }
+      if(choice?.endingRequest && !scene.ending){
+        lastErr = new Error("结局请求必须从当前幕收束，并在 end 字段返回 good/title/text；不要返回普通剧情或下一幕选项。");
+        if(attempt===maxAttempts-1) throw lastErr;
+        const pv = $("stream-preview");
+        if(pv) pv.textContent = "正在重新生成结局……";
         continue;
       }
       const earlyConsistency = validateSceneConsistency(scene,state);
@@ -406,7 +444,7 @@ async function aiTurn(choice){
         if(Array.isArray(scene.present)) scene.present = scene.present.filter(name=>!dead.has(name));
         if(!scene.lines.length && !scene.ending){
           lastErr = new Error("这幕只有已死亡人物的台词或动作，请改用在世人物或旁白推进。");
-          if(attempt===1) throw lastErr;
+          if(attempt===maxAttempts-1) throw lastErr;
           continue;
         }
       }
@@ -416,23 +454,36 @@ async function aiTurn(choice){
         scene.environment.longSkip = true;
       }
       environment = advanceEnvironment(state.environment,scene.environment,Boolean(choice),state);
+      if(!timeSkip && choice && !scene.ending){
+        const beforeClock = clockNow(state);
+        const afterClock = clockNow({...state,environment});
+        const jumpMinutes = Math.max(0, Math.round((afterClock-beforeClock)/60000));
+        const beforeDate = partsFromDate(beforeClock), afterDate = partsFromDate(afterClock);
+        const dateChanged = beforeDate.year!==afterDate.year || beforeDate.month!==afterDate.month || beforeDate.day!==afterDate.day;
+        if((jumpMinutes>=120 || dateChanged) && !confirm("检测到 AI 推进时间：" + formatDuration(Math.max(jumpMinutes,1)) + "。\n是否继续这次时间跳跃？")){
+          if(activeTurn===turn) activeTurn = null;
+          showCurrentScene(playerAction);
+          return;
+        }
+      }
       scene.fromMinute = sceneStartMinute(state.environment,scene.environment,environment,Boolean(choice));
       const commitIssue = tradeProblem(scene,state,choice) || custodyProblem(scene,choice)
         || genreSceneProblem(state,environment,genreMove,scene.genreData.done);
       money = commitIssue ? null : settleTurnMoney(state,scene,environment,choice);
       if(commitIssue || money.error){
         lastErr = new Error(commitIssue || money.error);
-        if(attempt===1) throw lastErr;
+        if(attempt===maxAttempts-1) throw lastErr;
         continue;
       }
       calculatedStamina = settleStamina(scene,{...state,species:state.species||(!state.turn ? scene.playerSpecies : ""),
         environment:{...state.environment,minute:scene.fromMinute}},
         environment.minute-scene.fromMinute,choice);
+      repairChoicesFromScene(scene,state);
       const problem = validateSceneForTurn(scene, state);
       if(problem){
         lastErr = new Error(problem);
         // 解析成功但质量欠佳：先重试一次；若仍不理想，也不再阻断，直接接受这一幕，避免反复弹错
-        if(attempt===1) break;
+        if(attempt===maxAttempts-1) break;
         const pv = $("stream-preview");
         if(pv) pv.textContent = "正在调整这一幕……";
         continue;
@@ -610,10 +661,20 @@ async function aiTurn(choice){
         if(trainingAttempt && effects.attrs) effects.attrs = Object.fromEntries(Object.entries(effects.attrs)
           .filter(([key,delta])=>delta<=0 || !["physique","agility","willpower"].includes(key)));
       }
+      if(localCombat && Number.isFinite(localCombat.hpLoss)){
+        const sceneLoss = Number.isFinite(effects.hp) && effects.hp<0 ? Math.abs(effects.hp) : 0;
+        const loss = Math.max(localCombat.hpLoss, sceneLoss);
+        if(loss) effects.hp = -loss;
+        else delete effects.hp;
+      }
       const attrBefore = {};
       for(const key of Object.keys(ATTR_LABELS)) attrBefore[key] = state[key]??50;
       applyEffect(state,effects,calculatedStamina);
       if(localCombat && state.combat) state.combat = {...state.combat, energy:localCombat.energyAfter};
+      if(localCombat){
+        entries.push({t:"sys",text:"交锋判定 · "+localCombat.outcome+" · "+localCombat.attrLabel+" "+localCombat.attrValue
+          +" · "+localCombat.skillName+" "+localCombat.skillValue+" · 体力 -"+localCombat.hpLoss});
+      }
       const trainGain = !wuxia && localTrainingGain(state,choice.text,attrBefore);
       if(wuxia){
         for(const text of settleMartialTraining(state,scene,choice,environment.minute-scene.fromMinute,S.hp)){
@@ -961,6 +1022,9 @@ async function aiTurn(choice){
     const ordinary = openLoops.filter(l=>!isStoryCommitment(l)).slice(-8);
     openLoops = openLoops.filter(l=>isStoryCommitment(l) || ordinary.includes(l));
     const chapterProgress = settleChapter(state,scene,loopHistory,environment,nextTurn);
+    if(!environment.place){
+      environment.place = String(scene.scene || chapterProgress.chapter?.title || state.scene || "").slice(0,100);
+    }
     const locations = updateLocationProfiles(state,environment.place,scene.environment.location);
     if(!scene.ending) scene.choices = completeSceneChoices(scene.choices,scene.lines,finalPresent,environment.place,
       {...state.plot,...Object.fromEntries(Object.entries(scene.plot).filter(([,text])=>text))}).slice(0,fullContext ? 4 : 3);
@@ -987,7 +1051,9 @@ async function aiTurn(choice){
         place:environment.place||state.environment?.place||"",
         scene:scene.scene||state.scene||"",
         advance:scene.advance||"",
-        summary:scene.summary||""
+        summary:scene.summary||"",
+        motifs:typeof sceneMotifs==="function" ? sceneMotifs(scene) : [],
+        narration:(scene.lines||[]).filter(l=>l.t==="narr").map(l=>l.text||"").join(" ").slice(0,120)
       }].slice(-8),
       consequences:advanceConsequences(state.consequences,scene,nextTurn,choice,environment.minute),
       memory:[...new Set([...state.memory,...scene.memory])].slice(-40),
@@ -996,6 +1062,8 @@ async function aiTurn(choice){
       ending:scene.ending,
       worldWindow: state.world ? advanceWorldWindow(state, nextTurn, scene.worldProgress) : (state.worldWindow||0),
       lastProse: Boolean(scene.prose),
+      llmMetrics:[...(state.llmMetrics||[]), ...((typeof window!=="undefined" && Array.isArray(window.__llmMetrics))
+        ? window.__llmMetrics.filter(metric=>metric.turn===nextTurn) : [])].slice(-20),
       stallCount: stalled ? Math.min(6, (state.stallCount||0) + 1) : 0,
       reports:(()=>{
         const prev = (state.reports||[]).map(r=>{
@@ -1225,9 +1293,6 @@ async function aiTurn(choice){
       S.ending = {good:false,title:"法网难逃",text:"官府终于动了真格。巡捕循着积压的报案与线人的口供，摸到了你的落脚处。火把照亮雨幕，刀剑出鞘的声音在巷口响起。你犯下的事一桩桩被翻了出来，这一次，没人再能压下案子——你没能走出这座城。"};
       entries.push({t:"sys",text:"你的罪行终于被官府追查到底。"});
     }
-    if(choice && choice.endingRequest && !S.ending){
-      S.ending = {good:true,title:"故事到此为止",text:"你选择在这里停下。之后的事，留给想象。"};
-    }
     ensureEconomy(S);
     if(choice){
       const changes = describeStatChanges(previous,S,curName(S));
@@ -1274,10 +1339,7 @@ async function aiTurn(choice){
     pendingSpeech?.remove();
     entries.forEach(logToDOM);
     limitLog();
-    if(beforeTurn){
-      undoStack.push(beforeTurn);
-      if(undoStack.length > UNDO_LIMIT) undoStack.shift();
-    }
+    rememberUndoState(beforeTurn);
     showCurrentScene();
     saveProgress();
     if(typeof recordTurnToDb==="function") recordTurnToDb(S,nextTurn,observedFacts).catch(()=>{});
@@ -1292,9 +1354,7 @@ async function aiTurn(choice){
     armIdleTimer();
   }finally{
     pendingSpeech?.remove();
-    const wasActive = activeTurn===turn;
-    if(wasActive) activeTurn = null;
-    if(wasActive && typeof scheduleNpcEnrichment==="function") scheduleNpcEnrichment(S);
+    if(activeTurn===turn) activeTurn = null;
   }
 }
 
