@@ -11,6 +11,21 @@
 <div class="app">
   <header class="play-header">
   <div class="topbar">
+    <div class="story-pace" id="story-pace" hidden>
+      <label for="story-pace-mode" class="sr-only">剧情节奏</label>
+      <select id="story-pace-mode" aria-label="剧情节奏">
+        <option value="natural" selected>自动</option>
+        <option value="slow">细致</option>
+        <option value="fast">快进</option>
+      </select>
+    </div>
+    <div class="topbar-icons">
+      <button class="icon-btn" id="btn-voice" aria-label="朗读剧情" aria-pressed="false" title="朗读剧情">🗣</button>
+      <button class="icon-btn" id="btn-side" aria-label="故事侧栏" aria-controls="story-side" title="故事侧栏">☰</button>
+      <button class="icon-btn" id="btn-undo" aria-label="撤销上一步剧情" title="没有可撤销的剧情" disabled>↩️</button>
+      <button class="icon-btn" id="btn-scene-img" aria-label="生成当前场景配图" title="为当前剧情点生成一张配图（按一次生一次）">🖼</button>
+      <button class="icon-btn" id="btn-menu" aria-label="返回酒馆首页" title="返回酒馆首页">🏠</button>
+    </div>
     <div class="title"><span id="story-title">暗夜酒馆</span></div>
     <div class="stats" aria-label="旅途记录">
       <div class="stat"><span id="s-coin-label">金币</span> <b class="coin" id="s-coin">0</b></div>
@@ -18,24 +33,22 @@
       <div class="stat" title="别人听说过你什么。熟悉你口碑的人可能更愿意作保、给消息或谈条件。">声望 <b id="s-rep">0</b></div>
       <span class="save-status" id="save-status" role="status"></span>
     </div>
-    <div class="topbar-icons">
-      <button class="icon-btn" id="btn-sound" aria-label="氛围音效" aria-pressed="false" title="氛围音效">🔇</button>
-      <button class="icon-btn" id="btn-side" aria-label="故事侧栏" aria-controls="story-side" title="故事侧栏">☰</button>
-      <button class="icon-btn" id="btn-undo" aria-label="撤销上一步剧情" title="没有可撤销的剧情" disabled>↩️</button>
-      <button class="icon-btn" id="btn-scene-img" aria-label="生成当前场景配图" title="为当前剧情点生成一张配图（按一次生一次）">🖼</button>
-      <button class="icon-btn" id="btn-menu" aria-label="返回酒馆首页" title="返回酒馆首页">🏠</button>
-    </div>
+    <button class="delta-chip" id="delta-chip" type="button" aria-label="本幕变化摘要" title="本幕变化摘要" hidden></button>
   </div>
-  <div class="world-status" id="world-status" aria-label="故事时间、地点与天气" hidden></div>
+  <div class="world-strip">
+    <div class="world-status" id="world-status" aria-label="故事时间、地点与天气" hidden></div>
+  </div>
   </header>
 
   <div class="main">
-    <div class="log" id="log" tabindex="0" aria-label="剧情记录"></div>
+    <div class="log-wrap">
+      <div class="log" id="log" tabindex="0" aria-label="剧情记录"></div>
+      <button class="log-latest" id="log-latest" type="button" hidden>↓ 回到最新<span class="log-latest-badge" id="log-latest-badge" hidden></span></button>
+    </div>
     <div class="side" id="story-side">
       <div class="side-tabs">
         <button class="side-tab active" data-tab="char">人物</button>
         <button class="side-tab" data-tab="story">篇章</button>
-        <button class="side-tab" data-tab="quest">任务</button>
         <button class="side-tab" data-tab="items">物品</button>
         <button type="button" class="icon-btn side-close" id="side-close" aria-label="关闭故事侧栏">×</button>
       </div>
@@ -54,8 +67,8 @@
     </div>
     <form class="custom-action" id="custom-action" hidden>
       <label for="action-text" class="sr-only">自由输入台词或行动，动作可以写在括号里</label>
-      <div class="talk-target" id="talk-target"></div>
       <textarea id="action-text" rows="1" maxlength="600" required enterkeyhint="send" placeholder="台词 /（动作）；输入「结束故事」可收尾"></textarea>
+      <div class="talk-target" id="talk-target"></div>
       <button class="big-btn" type="submit">发送</button>
     </form>
   </div>
@@ -75,7 +88,10 @@
 <script src="js/engine.js"></script>
 <script src="js/genre-systems.js"></script>
 <script src="js/turn.js"></script>
+<script src="js/voice.js"></script>
+<script src="js/qwen-workflow.js"></script>
 <script src="js/game.js"></script>
+<script src="js/backup.js"></script>
 <script src="js/ui.js"></script>
 <script src="js/boot.js"></script>
 </body>

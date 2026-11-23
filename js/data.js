@@ -100,6 +100,7 @@ const DEFAULT_STATE = () => ({
   expensePlans: [],
   lastTimeSettlement: null,
   llmMetrics: [],
+  turnStats: [],
   savings: null,   // 存款（与手头现金分开；未知时为 null，由 AI 按身份/家境给出）
   economyMode: "",
   moneyBook: [],
@@ -161,6 +162,7 @@ const DEFAULT_STATE = () => ({
   openLoops: [],   // 未了事项 [{id,text,kind,createdTurn,createdMinute,dueTurn,dueMinute,participants}]
   loopSeq: 0,
   lastLoopNudgeMinute: null,
+  npcPlans: [],
   loopHistory: [], // 已收回的未了事项
   chapterHistory: [],
   locations: [],
@@ -179,6 +181,8 @@ const DEFAULT_STATE = () => ({
   choices: [],
   ending: null,
   genre: "",       // 故事类型（如 悬疑、奇幻、恋爱…）
+  dailyPace: "natural",
+  dailyDecision: null,
   storyTemplate: "", // 随机剧本的叙事骨架（追凶/守护/交易/逃亡…），用于降低重复感
   hiddenQuest: null, // 隐藏主线当前阶段 {title,desc,stakes,status,reward,stage,final}，玩家不可见，AI 内部驱动
   hiddenArc: [],     // 已完成/失败的隐藏阶段历史 [{stage,title,desc,outcome}]
@@ -197,6 +201,8 @@ const DEFAULT_STATE = () => ({
   idleCount: 0,      // 已发生的超时次数（AI 内部，用于累积后果）
   idlePaused: false, // 连续两次无回应后暂停自动推进，等待玩家回来
   noNagUntil: 0,     // 「拒绝冷却」：在此幕之前，AI 不得再提玩家拒绝过的请求
+  rejectedRequest: "", // 玩家最近拒绝/推掉的请求原话，冷却期间引用给 AI，明确「别再兜售这件事」
+  playerClaims: [],  // 玩家声明已了结的事 [{text,turn,knownBy}]：按事实处理，默认全员知情
   afterglow: 0,      // 亲密余韵剩余幕数：期间不谈正事、不复盘任务
   intimateActive: false, // 亲密场景是否正在进行（上一幕未结束）
   lastInitTurn: 0,   // 上一次 NPC 主动找玩家的幕数
@@ -213,8 +219,11 @@ let undoStack = [];
 let roleCardCache = new Map();
 let npcDetailName = "";
 let npcEditName = "";
+let playerEditMode = false;
+let playerDetail = false;   // 「你自己」的详情页是否展开
 const UNDO_LIMIT = 2;
 let saveQueue = Promise.resolve();
+let lastSaveBytes = 0;
 let journeyOwner = "";
 
 /* ==================== 登录 / API ==================== */
@@ -319,10 +328,12 @@ async function showPersonalAI(back = showTitle){
       <label for="personal-key">API 密钥</label>
       <input id="personal-key" type="password" autocomplete="new-password" maxlength="4096">
       <div class="form-note" id="personal-status" role="status">正在读取设置……</div>
-      <button type="submit" class="big-btn" id="personal-save" disabled>保存并使用</button>
-      <button type="button" class="big-btn ghost" id="personal-test" disabled>测试已保存的连接</button>
-      <button type="button" class="logout-btn" id="personal-delete" disabled>移除个人配置</button>
-      <button type="button" class="logout-btn" id="personal-back">返回首页</button>
+      <div class="form-actions">
+        <button type="submit" class="big-btn" id="personal-save" disabled>保存并使用</button>
+        <button type="button" class="big-btn ghost" id="personal-test" disabled>测试已保存的连接</button>
+        <button type="button" class="big-btn ghost" id="personal-delete" disabled>移除个人配置</button>
+        <button type="button" class="big-btn ghost" id="personal-back">返回首页</button>
+      </div>
     </form>`;
   const form = $("personal-ai"), base = $("personal-base"), model = $("personal-model"), key = $("personal-key");
   const status = $("personal-status"), save = $("personal-save"), test = $("personal-test"), remove = $("personal-delete");
@@ -396,7 +407,7 @@ function singlePathQuery(path){
   const q={}; if(i>=0) String(path).slice(i+1).split("&").forEach(kv=>{ if(!kv) return; const j=kv.indexOf("="); const k=j<0?kv:kv.slice(0,j); const v=j<0?"":kv.slice(j+1); try{ q[decodeURIComponent(k)]=decodeURIComponent(v); }catch(e){} });
   return {p,q};
 }
-function singleApi(path, { method="GET", body } = {}){
+async function singleApi(path, { method="GET", body } = {}){
   const {p,q} = singlePathQuery(path);
   const now = Date.now();
   if(p==="/api/login" && method==="POST") return {token:"single-local",username:"local"};
@@ -420,13 +431,18 @@ function singleApi(path, { method="GET", body } = {}){
   if(p==="/api/worlds"){
     const worlds = singleWorlds();
     if(method==="GET"){
-      if(q.id){ const w=worlds.find(x=>x.id===q.id); if(!w) throw singleErr(404,"这份旅途已不存在"); return {world:w}; }
+      if(q.id){
+        const w=worlds.find(x=>x.id===q.id); if(!w) throw singleErr(404,"这份旅途已不存在");
+        let text = typeof w.text==="string" ? w.text : "";
+        if(!text && typeof tavernDbGetWorldText==="function") text = await tavernDbGetWorldText(w.id);
+        return {world:{...w,text}};
+      }
       return {worlds: worlds.map(({text,bible,...meta})=>meta)};
     }
     if(method==="POST"){
       const b=body||{};
       const name = typeof b.name==="string" ? b.name.trim() : "";
-      if(!name || typeof b.text!=="string" || b.text.length>500000) throw singleErr(400,"无效的旅途名称或设定");
+      if(!name || typeof b.text!=="string" || b.text.length>3000000) throw singleErr(400,"旅途名称或文本无效（最多 300 万字符）");
       const isBook = b.isBook === true;
       let w = null;
       if(!b.createNew){
@@ -444,7 +460,10 @@ function singleApi(path, { method="GET", body } = {}){
       if(typeof b.worldStart==="string" && b.worldStart) w.worldStart=b.worldStart.slice(0,600);
       if(b.role) w.role=journeyRole(b.role);
       if(typeof b.genre==="string" && b.genre) w.genre=b.genre.slice(0,24);
-      Object.assign(w,{text:b.text, savedAt:now});
+      const fullText = b.text;
+      if(typeof tavernDbPutWorldText==="function") await tavernDbPutWorldText(w.id, fullText);
+      w.text = fullText.length > 200000 ? "" : fullText;
+      w.savedAt = now;
       if(typeof b.summary==="string" && b.summary) w.summary=b.summary.slice(0,4000);
       if(b.bible && typeof b.bible==="object"){
         try{ const s2=JSON.stringify(b.bible); if(s2.length<=400000) w.bible=JSON.parse(s2); }catch(e){}
@@ -452,7 +471,7 @@ function singleApi(path, { method="GET", body } = {}){
       if(typeof b.title==="string" && b.title) w.title=b.title.slice(0,120);
       if(typeof b.author==="string" && b.author) w.author=b.author.slice(0,80);
       saveSingleWorlds(worlds);
-      return {world:w};
+      return {world:{...w,text:fullText}};
     }
   }
   if(p==="/api/worlds/rename" && method==="POST"){
@@ -476,7 +495,10 @@ function singleApi(path, { method="GET", body } = {}){
     if(!target || !target.isBook) throw singleErr(400,"这不是书库中的小说剧本");
     const ids=new Set([id,...worlds.filter(w=>w.bookId===id).map(w=>w.id)]);
     saveSingleWorlds(worlds.filter(w=>!ids.has(w.id)));
-    for(const wid of ids){ try{ localStorage.removeItem(singleSaveKey(wid)); }catch(e){} }
+    for(const wid of ids){
+      try{ localStorage.removeItem(singleSaveKey(wid)); }catch(e){}
+      if(typeof tavernDbDeleteWorldText==="function") await tavernDbDeleteWorldText(wid);
+    }
     return {ok:true,deleted:[...ids]};
   }
   if(p==="/api/worlds/delete" && method==="POST"){
@@ -485,13 +507,20 @@ function singleApi(path, { method="GET", body } = {}){
     const worlds=singleWorlds();
     const target=worlds.find(w=>w.id===id);
     if(target && target.isBook) throw singleErr(400,"这是书库中的小说剧本，不能从旅途记录里删除。");
-    if(target && target.source==="upload" && !target.bookId && typeof target.text==="string"){
-      worlds.push({...target, id:"w"+now.toString(36)+Math.random().toString(36).slice(2,6),
-        name:String(target.name||"导入书").slice(0,240)+"（书库原文）", isBook:true, source:"upload",
-        turn:0, scene:"", finished:false, savedAt:now});
+    if(target && target.source==="upload" && !target.bookId){
+      const text = (typeof target.text==="string" && target.text) ? target.text
+        : (typeof tavernDbGetWorldText==="function" ? await tavernDbGetWorldText(target.id) : "");
+      if(text){
+        const newId = "w"+now.toString(36)+Math.random().toString(36).slice(2,6);
+        worlds.push({...target, id:newId, text:text.length>200000 ? "" : text,
+          name:String(target.name||"导入书").slice(0,240)+"（书库原文）", isBook:true, source:"upload",
+          turn:0, scene:"", finished:false, savedAt:now});
+        if(typeof tavernDbPutWorldText==="function") await tavernDbPutWorldText(newId,text);
+      }
     }
     saveSingleWorlds(worlds.filter(w=>w.id!==id));
     try{ localStorage.removeItem(singleSaveKey(id)); }catch(e){}
+    if(typeof tavernDbDeleteWorldText==="function") await tavernDbDeleteWorldText(id);
     return {ok:true};
   }
   if(p==="/api/save"){
@@ -506,14 +535,14 @@ function singleApi(path, { method="GET", body } = {}){
       try{ localStorage.setItem(singleSaveKey(b.id), JSON.stringify(b.save)); }
       catch(e){ throw singleErr(507,"本地存储空间不足，存档保存失败"); }
       const worlds=singleWorlds(); const w=worlds.find(x=>x.id===b.id);
-      if(w){ w.turn=Number.isSafeInteger(b.save.turn)?b.save.turn:0; w.scene=typeof b.save.scene==="string"?b.save.scene.slice(0,150):""; w.finished=!!b.save.ending; w.savedAt=now; saveSingleWorlds(worlds); }
+      if(w){ w.turn=Number.isSafeInteger(b.save.turn)?b.save.turn:0; w.scene=typeof b.save.scene==="string"?b.save.scene.slice(0,150):""; w.finished=!!b.save.ending; w.savedAt=now; try{ saveSingleWorlds(worlds); }catch(error){ /* The individual save has already committed. */ } }
       return {ok:true};
     }
   }
   throw singleErr(404,"未找到接口");
 }
 
-async function api(path, { method = "GET", body, token = AUTH.token } = {}){
+async function api(path, { method = "GET", body, token = AUTH.token, timeout = 15000 } = {}){
   if(isSingleMode()) return singleApi(path, { method, body, token });
   let res;
   try{
@@ -521,7 +550,7 @@ async function api(path, { method = "GET", body, token = AUTH.token } = {}){
       method,
       headers: { ...(body ? {"Content-Type":"application/json"} : {}), ...(token ? {Authorization:"Bearer "+token} : {}) },
       body: body ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(15000)
+      signal: AbortSignal.timeout(timeout)
     });
   }catch(e){ throw new Error("暂时无法连接酒馆，请稍后重试"); }
   const data = await res.json().catch(()=>({}));
@@ -538,17 +567,160 @@ const $ = id => document.getElementById(id);
 const clamp = (v,a,b)=>Math.max(a,Math.min(b,v));
 
 function addLog(entry){ S.log.push(entry); }
+// 日志「回到最新」：玩家翻看旧剧情时，新消息只提示不强行拉回底部
+let logUnseen = 0;
+// 玩家没有主动上翻时保持「贴底」：WebView 的 scrollHeight 追加后不是同步更新，
+// 所以用显式状态而不是每次都读 scrollTop 判断。
+let logPinned = true;
+let logScrollLock = 0;
+function pinLogToBottom(){
+  const log = $("log");
+  if(log && logPinned){
+    logScrollLock = Date.now()+200;
+    log.scrollTop = log.scrollHeight;
+  }
+  syncLogLatest();
+}
+function logAtBottom(){
+  const log = $("log");
+  if(!log) return true;
+  const height = Number(log.scrollHeight)||0;
+  const top = Number(log.scrollTop)||0;
+  const client = Number(log.clientHeight)||0;
+  return height-top-client < 56;
+}
+function syncLogLatest(){
+  const btn = $("log-latest");
+  if(!btn) return;
+  const badge = $("log-latest-badge");
+  if(logPinned) logUnseen = 0;
+  btn.hidden = logPinned;
+  if(badge){
+    badge.hidden = !(logUnseen>0);
+    badge.textContent = logUnseen>0 ? ("新 "+logUnseen+" 条") : "";
+  }
+}
+function noteLogAdded(count=1){
+  if(logPinned) return;
+  logUnseen += count;
+  syncLogLatest();
+}
+function scrollLogToLatest(){
+  const log = $("log");
+  logUnseen = 0;
+  logPinned = true;
+  if(log){
+    logScrollLock = Date.now()+200;
+    log.scrollTop = log.scrollHeight;
+    setTimeout(pinLogToBottom,60);
+  }
+  syncLogLatest();
+}
 function renderLog(){
   const log = $("log");
   log.replaceChildren();
   S.log.forEach(logToDOM);
+  logUnseen = 0;
+  logPinned = true;
+  logScrollLock = Date.now()+200;
   log.scrollTop = log.scrollHeight;
+  syncLogLatest();
+  // 图片是异步解码/读取的，撑高后再贴一次底
+  setTimeout(pinLogToBottom,350);
+  setTimeout(pinLogToBottom,1200);
 }
 function limitLog(){
   S.log = S.log.slice(-120);
   const log = $("log");
   while(log.children.length>S.log.length) log.firstElementChild.remove();
-  log.scrollTop = log.scrollHeight;
+  if(logPinned){
+    logScrollLock = Date.now()+200;
+    log.scrollTop = log.scrollHeight;
+  }
+  syncLogLatest();
+}
+(function wireLogLatest(){
+  if(typeof document==="undefined" || typeof document.getElementById!=="function") return;
+  const log = $("log");
+  if(log && typeof log.addEventListener==="function"){
+    log.addEventListener("scroll",()=>{
+    if(Date.now() < logScrollLock) return;
+    logPinned = logAtBottom();
+    syncLogLatest();
+  },{passive:true});
+  }
+  const btn = $("log-latest");
+  if(btn && typeof btn.addEventListener==="function"){
+    btn.addEventListener("click",scrollLogToLatest);
+  }
+})();
+let avatarPickTarget = null;
+function openAvatarPicker(kind,name){
+  avatarPickTarget = {kind,name};
+  let input = document.getElementById("avatar-file");
+  if(!input){
+    input = document.createElement("input");
+    input.id = "avatar-file";
+    input.type = "file";
+    input.accept = "image/*";
+    input.hidden = true;
+    input.onchange = handleAvatarFile;
+    document.body.appendChild(input);
+  }
+  input.value = "";
+  input.click();
+}
+function imageFileToAvatarData(file){
+  return new Promise((resolve,reject)=>{
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = ()=>{
+      try{
+        const max = 768;
+        const scale = Math.min(1, max/Math.max(img.width||1,img.height||1));
+        const w = Math.max(1,Math.round((img.width||1)*scale));
+        const h = Math.max(1,Math.round((img.height||1)*scale));
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext("2d").drawImage(img,0,0,w,h);
+        const data = canvas.toDataURL("image/jpeg",0.86);
+        URL.revokeObjectURL(url);
+        resolve(data);
+      }catch(e){ URL.revokeObjectURL(url); reject(e); }
+    };
+    img.onerror = ()=>{ URL.revokeObjectURL(url); reject(new Error("无法读取这张图片，请换一张 JPG/PNG")); };
+    img.src = url;
+  });
+}
+async function handleAvatarFile(event){
+  const file = event.target.files && event.target.files[0];
+  event.target.value = "";
+  const target = avatarPickTarget;
+  avatarPickTarget = null;
+  if(!file || !target) return;
+  if(!/^image\//.test(file.type)){ alert("请选择手机里的图片文件"); return; }
+  try{
+    const data = await imageFileToAvatarData(file);
+    const key = "avatar:"+(S.worldId||"local")+":"+(target.kind==="player" ? "__player__" : target.name);
+    await imagePut(key,data);
+    if(target.kind==="player"){
+      S.avatarKey = key;
+    }else{
+      const c = (S.cast||[]).find(x=>x && x.name===target.name);
+      if(!c) throw new Error("人物不存在");
+      c.avatarKey = key;
+    }
+    document.querySelectorAll("img[data-avatar-key]").forEach(img=>{
+      if(img.dataset.avatarKey===key) img.src = data;
+    });
+    if(typeof renderLog==="function") renderLog();
+    await saveProgress();
+    refreshSide();
+    if(typeof imageToast==="function") imageToast("头像已更新",2500);
+  }catch(e){
+    alert("设置头像失败："+e.message);
+  }
 }
 function logAvatarFor(name, isPlayer){
   const initial = String(name || "?").slice(0,1);
@@ -575,6 +747,9 @@ function logAvatarFor(name, isPlayer){
   return '<span class="log-avatar log-avatar-fallback">'+escapeHtml(initial)+'</span>';
 }
 function logToDOM(entry){
+  const rawText = String(entry && entry.text || "");
+  if(/^\s*\{\s*["']?(?:narration|beats|choices|plot|scene|effects|advance|end|characters|environment|present|summary)\b/.test(rawText)
+    || /"narration"\s*:/.test(rawText.slice(0,300))) return null;
   const log = $("log");
   const div = document.createElement("div");
   div.className = "line " + (entry.t==="speech" ? "say speech" : entry.t||"narr");
@@ -584,6 +759,10 @@ function logToDOM(entry){
     const av = logAvatarFor(entry.who, !!pname && entry.who===pname);
     const body = '<span class="who">'+escapeHtml(speaker)+'</span><span class="txt">'+escapeHtml(entry.text)+'</span>';
     div.innerHTML = av ? '<div class="log-row">'+av+'<div class="log-body">'+body+'</div></div>' : body;
+    // 点台词单独朗读：按这个人物自己的声线，不必从头听整幕
+    div.classList.add("speakable");
+    div.title = "点按朗读这句（按"+entry.who+"的声线）";
+    div.onclick = ()=>{ if(typeof ttsReadLine==="function") ttsReadLine(entry.who, entry.text); };
   } else if(entry.t==="npc-action"){
     const av = logAvatarFor(entry.who,false);
     const body = '<b>'+escapeHtml(entry.who)+' · 行动</b>　'+escapeHtml(entry.text);
@@ -591,49 +770,217 @@ function logToDOM(entry){
   } else if(entry.t==="action"){
     const pname = (typeof playerImageSpec==="function") ? playerImageSpec().name : "你";
     const av = logAvatarFor(pname,true);
-    div.innerHTML = av ? '<div class="log-row">'+av+'<div class="log-body">'+escapeHtml(entry.text)+'</div></div>' : entry.text;
+    div.innerHTML = av ? '<div class="log-row">'+av+'<div class="log-body">'+escapeHtml(entry.text)+'</div></div>' : escapeHtml(entry.text);
   } else if(entry.t==="image"){
     div.className = "line image";
     const img = document.createElement("img");
     img.className = "log-image";
     img.alt = entry.alt || "场景图";
+    img.onload = pinLogToBottom;
     if(entry.key){
       img.dataset.imageKey = entry.key;
       if(typeof imageGet==="function") imageGet(entry.key).then(d=>{ if(d) img.src = d; }).catch(()=>{});
     }else if(entry.data){
       img.src = entry.data;
     }
+    img.style.cursor = "zoom-in";
+    img.onclick = async ()=>{
+      let src = img.getAttribute("src") || "";
+      if(!src && entry.key && typeof imageGet==="function"){
+        try{ src = await imageGet(entry.key); }catch(e){}
+      }
+      if(src) openImageViewer(src, entry.alt || "场景图");
+    };
     div.appendChild(img);
   } else {
     div.textContent = entry.text;
   }
   log.appendChild(div);
+  // 贴底状态下跟随新内容；玩家上翻阅读时只计数并提示，不强行拉回
+  if(logPinned){
+    logScrollLock = Date.now()+200;
+    log.scrollTop = log.scrollHeight;
+    // 追加后 WebView 的 scrollHeight 可能还是旧值，下一帧再贴一次
+    if(typeof requestAnimationFrame==="function") requestAnimationFrame(pinLogToBottom);
+    setTimeout(pinLogToBottom,60);
+    syncLogLatest();
+  } else {
+    logUnseen += 1;
+    syncLogLatest();
+  }
   const img = div.querySelector("img[data-avatar-key]");
   if(img && typeof imageGet==="function"){
-    imageGet(img.dataset.avatarKey).then(d=>{ if(d) img.src = d; }).catch(()=>{});
+    imageGet(img.dataset.avatarKey).then(d=>{ if(d){ img.onload = pinLogToBottom; img.src = d; } }).catch(()=>{});
   }
   return div;
 }
 function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
 
+function openImageViewer(src,alt=""){
+  if(!src) return;
+  let viewer = document.getElementById("image-viewer");
+  if(!viewer){
+    viewer = document.createElement("div");
+    viewer.id = "image-viewer";
+    viewer.setAttribute("role","dialog");
+    viewer.setAttribute("aria-modal","true");
+    viewer.style.cssText = "position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,.94);display:none;align-items:center;justify-content:center;padding:12px;box-sizing:border-box;";
+    const img = document.createElement("img");
+    img.style.cssText = "max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;border-radius:6px;box-shadow:0 12px 50px rgba(0,0,0,.65);";
+    const close = document.createElement("button");
+    close.type = "button";
+    close.textContent = "×";
+    close.setAttribute("aria-label","关闭图片");
+    close.style.cssText = "position:absolute;top:calc(6px + env(safe-area-inset-top));right:10px;width:40px;height:40px;border:0;border-radius:50%;background:rgba(255,255,255,.14);color:#fff;font-size:26px;line-height:38px;cursor:pointer;";
+    viewer.appendChild(img);
+    viewer.appendChild(close);
+    document.body.appendChild(viewer);
+  }
+  const img = viewer.querySelector("img");
+  const close = viewer.querySelector("button");
+  const hide = ()=>{ viewer.style.display = "none"; img.removeAttribute("src"); };
+  close.onclick = hide;
+  viewer.onclick = event=>{ if(event.target===viewer) hide(); };
+  img.src = src;
+  img.alt = alt || "场景图";
+  viewer.style.display = "flex";
+}
+
+/* 物品效果摘要：列表里直接写清这件东西能带来什么，点「使用」前就知道会发生什么。 */
+function itemEffectText(effect){
+  if(!effect || typeof effect!=="object") return "";
+  const labels = {coin:"金",hp:"体力",rep:"声望",morality:"道德",wanted:"通缉",stealth:"隐蔽",health:"健康",
+    qi:"内力",combatPower:"武力",desire:"欲望"};
+  const attrLabels = {iq:"智商",physique:"体质",charm:"魅力",willpower:"意志",agility:"敏捷"};
+  const driveLabels = {money:"金钱",power:"权力",sex:"欲望",people:"人",items:"物品"};
+  const parts = [];
+  const push = (label,v)=>Number.isFinite(v) && v ? parts.push(label+(v>0?"+":"")+v) : null;
+  for(const [key,label] of Object.entries(labels)) push(label,effect[key]);
+  for(const [key,value] of Object.entries(effect.attrs||{})) push(attrLabels[key]||key,value);
+  for(const [key,value] of Object.entries(effect.drives||{})) push(driveLabels[key]||key,value);
+  for(const [key,value] of Object.entries(effect.skills||{})) push(key,value);
+  return parts.length ? "使用后 "+parts.join(" · ") : "可用";
+}
+
+/* 物品效果的说明文字：除了基础数值，也覆盖属性、欲望、技能与武力，避免「用了没反应」。 */
+function describeItemChanges(before,after,coinName){
+  const out = [];
+  const push = (label,delta)=>delta ? out.push(label+" "+(delta>0?"+":"")+delta) : null;
+  const base = describeStatChanges(before,after,coinName);
+  if(base) out.push(base);
+  push("隐蔽度",(after.concealment||0)-(before.concealment||0));
+  push("健康",(after.health??100)-(before.health??100));
+  const attrLabels = {iq:"智商",physique:"体质",charm:"魅力",willpower:"意志",agility:"敏捷"};
+  for(const [key,label] of Object.entries(attrLabels)) push(label,(after[key]||0)-(before.attrs?.[key]||0));
+  push("内力",(after.combat?.energy||0)-(before.qi||0));
+  push("武力",(after.combat?.power||0)-(before.combatPower||0));
+  const driveLabels = {money:"金钱",power:"权力",sex:"欲望",people:"人",items:"物品"};
+  const nowDrives = ensureDrives(after);
+  for(const [key,label] of Object.entries(driveLabels)) push(label,(nowDrives[key]||0)-(before.drives?.[key]||0));
+  for(const [skill,value] of Object.entries(after.skills||{})) push(skill,value-(before.skills?.[skill]||0));
+  return out.filter(Boolean).join(" · ");
+}
+
+/* 「查看」：只展示物品本身，不消耗、不结算数值。 */
+function lookItem(index){
+  const it = S.items && S.items[index];
+  if(!it) return;
+  const lines = ["「"+it.name+"」"];
+  if(it.desc) lines.push(it.desc);
+  const meta = [it.qty>1?("数量 "+it.qty):"", Number.isFinite(it.value)&&it.value>0?("约 "+it.value+" "+curName(S)):"",
+    it.effect?itemEffectText(it.effect):"", it.consumable===false?"不会用尽":"用一次少一件"].filter(Boolean);
+  if(meta.length) lines.push(meta.join(" · "));
+  const txt = lines.join("　");
+  addLog({t:"sys",text:txt}); logToDOM({t:"sys",text:txt});
+}
+
+function showItem(index){
+  const it = S.items && S.items[index];
+  if(!it || !S.ai || activeTurn) return;
+  // 出示物品是一次真实的行动：交给 AI 演出对方的反应，物品本身不消耗。
+  const target = (S.present||[]).includes(S.talkTarget) ? S.talkTarget : "";
+  const to = target || ((S.present||[]).length===1 ? S.present[0] : "");
+  const text = "（我把「"+it.name+"」"+(it.desc?("——"+it.desc):"")
+    + "拿了出来"+(to ? ("，递到"+to+"面前，让对方看清上面的内容") : "，摊开在桌上")+"）";
+  dismissDrawer();
+  aiTurn({text,target:to});
+}
+
+/* 物品自带的声望效果：AI 模式下写进当前地点的口碑账，和剧情结算保持一致 */
+function applyItemReputation(delta,itemName){
+  if(!Number.isFinite(delta) || !delta) return 0;
+  const scope = S.reputationScope || S.environment?.place || "";
+  if(!S.ai || !scope){
+    S.rep = clamp((S.rep||0)+delta,-100,100);
+    return delta;
+  }
+  const oldScore = (S.reputations||[]).find(r=>r.scope===scope)?.score || 0;
+  const score = clamp(oldScore+delta,-100,100);
+  S.rep = (S.rep||0)+(score-oldScore);
+  S.reputations = [...(S.reputations||[]).filter(r=>r.scope!==scope),
+    {scope,score,reason:"使用了「"+itemName+"」"}].slice(-24);
+  return score-oldScore;
+}
+
 function useItem(index){
   const it = S.items && S.items[index];
   if(!it || !S.ai || activeTurn) return;
   if(!it.effect){
-    const txt = "你查看了一下「"+it.name+"」"+(it.desc?"："+it.desc:"")+"。";
+    const txt = "「"+it.name+"」只是线索，没有可以使用的效果。"+(it.desc?"（"+it.desc+"）":"");
     addLog({t:"sys",text:txt}); logToDOM({t:"sys",text:txt});
     return;
   }
-  const before = {coin:S.coin, hp:S.hp, rep:S.rep, morality:S.morality||0, wanted:S.wanted||0};
+  // 需要花钱的物品先确认余额，避免物品被消耗却没能付钱
+  const coinCost = Number.isFinite(it.effect.coin) && it.effect.coin<0 ? -it.effect.coin : 0;
+  if(coinCost){
+    let txt = "";
+    if(economicMode(S)==="barter") txt = "这里以物易物，用不上金币，「"+it.name+"」暂时无法使用。";
+    else if((S.coin||0)<coinCost) txt = "「"+it.name+"」需要 "+coinCost+" "+curName(S)+"，你只有 "+(S.coin||0)+"，先用不了。";
+    if(txt){
+      addLog({t:"sys",text:txt}); logToDOM({t:"sys",text:txt});
+      return;
+    }
+  }
+  // 使用前确认：说清这件东西会带来什么、会不会用掉，避免误点后物品直接消失。
+  const summary = itemEffectText(it.effect);
+  const willUse = it.consumable!==false;
+  const left = it.qty||1;
+  const ask = "要使用「"+it.name+"」吗？\n"+(it.desc?it.desc+"\n":"")+(summary?summary+"\n":"")
+    +(willUse ? (left>1 ? ("会消耗 1 件，还剩 "+(left-1)+" 件") : "用后会用尽") : "不会用尽");
+  if(typeof confirm==="function" && !confirm(ask)) return;
+  // 数值结算与物品扣除都在快照上完成：物品效果只作用于当前状态，
+  // 不能等到下一幕的 AI 结算才生效，否则下一幕以旧快照为基准，物品与数值都会回滚。
+  rememberUndoState(snapshotState(S));
+  const drivesBefore = {...ensureDrives(S)};
+  const attrsBefore = Object.fromEntries(["iq","physique","charm","willpower","agility"].map(key=>[key,S[key]]));
+  const before = {coin:S.coin, hp:S.hp, rep:S.rep, morality:S.morality||0, wanted:S.wanted||0,
+    concealment:S.concealment||0, health:S.health??100,
+    attrs:attrsBefore, qi:S.combat?.energy||0, combatPower:S.combat?.power||0,
+    drives:drivesBefore, skills:{...(S.skills||{})}};
   const effects = {...it.effect,payment:it.name};
+  // 声望按当前地点结算，其余数值走通用效果
+  const repDelta = Number.isFinite(effects.rep) ? effects.rep : 0;
   delete effects.rep;
-  applyEffect(S,effects);
-  const changes = describeStatChanges(before, S, curName(S));
-  if(it.consumable!==false){ it.qty=(it.qty||1)-1; if((it.qty||0)<=0) S.items.splice(index,1); }
-  const txt = "你使用了「"+it.name+"」"+(changes?"："+changes:"")+"。";
+  const issues = applyEffect(S,effects) || [];
+  if(repDelta) applyItemReputation(repDelta,it.name);
+  const changes = describeItemChanges(before, S, curName(S));
+  const issueText = issues.some(i=>i.kind==="coin")
+    ? "（金币未能入账）" : "";
+  if(issues.length) delete S._effectIssues;
+  const remain = willUse ? Math.max(0,left-1) : left;
+  if(willUse){ it.qty=remain; if(remain<=0) S.items.splice(index,1); }
+  const txt = "你使用了「"+it.name+"」"+(changes?"："+changes:"")
+    + (willUse && remain>0 ? "（还剩 "+remain+" 件）" : "")+issueText+"。";
   addLog({t:"sys",text:txt}); logToDOM({t:"sys",text:txt});
-  S.memory = [...(S.memory||[]), "玩家使用了「"+it.name+"」"].slice(-40);
-  refreshStats(); refreshSide(); saveProgress();
+  // 写进记忆与剧情消息，下一幕的 AI 才知道玩家用过它，并演出后续效果。
+  S.memory = [...(S.memory||[]), "玩家使用了「"+it.name+"」"+(it.desc?"："+it.desc:"")].slice(-40);
+  S.history = [...(S.history||[]), {role:"user",content:"（我使用了「"+it.name+"」"+(it.desc?"："+it.desc:"")+"）"}].slice(-10);
+  // 物品效果已在本地结算过，下一幕的 AI 不能再把它当成一次行动重复加数值。
+  S.itemUsedNote = "【物品已结算】玩家在第 "+S.turn+" 幕使用了「"+it.name+"」"+(changes?("，程序已直接结算 "+changes):"")
+    +"。数值已经生效，下一幕不要再对这件物品重复加数值；只需顺着场景自然演出它的作用与后果。";
+  // 场景选项是上一幕的，用过物品后重新生成，避免把物品效果重复结算一次。
+  showCurrentScene();
+  saveProgress();
 }
 
 function refreshStats(){
@@ -662,6 +1009,187 @@ function refreshStats(){
   status.textContent = S.ai ? [formatClock(S),place,env.weather,"时间线："+timelineLabel(S)].filter(Boolean).join(" · ")
     : formatStoryTime(env.minute,S);
   status.hidden = !status.textContent;
+  renderDeltaChip();
+}
+
+/* ==================== 本幕变化摘要 ==================== */
+/* 从上一幕的日志里挑出真正影响玩家的变化（数值与关键事件），压成一枚小标签 */
+const DELTA_MAX_ITEMS = 4;
+const DELTA_ENTRY_RULES = [
+  {re:/^(金币)\s*([+\-]?)(\d+)/, kind:"money"},
+  {re:/^属性 · (.+?) ([+\-]\d+)/, kind:"attr"},
+  {re:/^体力变化/, kind:"stamina"},
+  {re:/^口碑|的口碑/, kind:"rep"},
+  {re:/^(获得物品|失去物品)/, kind:"item"},
+  {re:/^(.+?) 出现在这里/, kind:"join"},
+  {re:/^(.+?) 起身离开了这里/, kind:"leave"},
+  {re:/^(承诺进展|承诺)/, kind:"promise"},
+  {re:/^(交锋判定)/, kind:"combat"},
+  {re:/^(.+?) (暗中递了话|伤重难支|再也支撑不住|的伤)/, kind:"npc"}
+];
+function deltaSummaryFromLog(log){
+  const lastTurn = (log||[]).reduce((max,e)=>Math.max(max,Number(e?.turn)||0),0);
+  if(!lastTurn) return [];
+  const items = [];
+  for(const e of (log||[])){
+    if(!e || Number(e.turn)!==lastTurn) continue;
+    const text = String(e.text||"");
+    const rule = DELTA_ENTRY_RULES.find(r=>r.re.test(text));
+    if(!rule) continue;
+    const m = text.match(rule.re);
+    let label = "";
+    if(rule.kind==="money") label = "金币 "+(m[2]||"")+(m[3]);
+    else if(rule.kind==="attr") label = m[1]+" "+m[2];
+    else if(rule.kind==="stamina") label = "体力变动";
+    else if(rule.kind==="rep") label = text.replace(/^.*?的口碑 · /,"口碑 ").slice(0,14);
+    else if(rule.kind==="combat") label = "交锋 "+text.split(" · ")[1];
+    else if(rule.kind==="join" || rule.kind==="leave" || rule.kind==="npc") label = m[1]+(rule.kind==="join"?" 到场":rule.kind==="leave"?" 离场":" 有事");
+    else label = text.slice(0,14);
+    if(label && !items.some(x=>x.label===label)){
+      const event = rule.kind==="join" || rule.kind==="leave" || rule.kind==="npc" || rule.kind==="item" || rule.kind==="promise";
+      items.push({label,event});
+    }
+  }
+  // 数值优先，事件补位：先放数值，再放人物进出、物品、承诺
+  return [...items.filter(x=>!x.event),...items.filter(x=>x.event)].slice(0,DELTA_MAX_ITEMS).map(x=>x.label);
+}
+function renderDeltaChip(){
+  const chip = $("delta-chip");
+  if(!chip) return;
+  const items = S.ai && !S.ending ? deltaSummaryFromLog(S.log) : [];
+  if(!items.length){ chip.hidden = true; chip.textContent = ""; return; }
+  const signature = items.join("|");
+  const changed = chip.dataset ? chip.dataset.deltaSig !== signature : false;
+  if(chip.dataset) chip.dataset.deltaSig = signature;
+  chip.hidden = false;
+  chip.textContent = "本幕 "+items.join(" · ");
+  chip.title = "本幕变化："+items.join("；");
+  chip.onclick = ()=>{ renderLog(); const log = $("log"); if(log) log.scrollTop = log.scrollHeight; };
+  // 新变化时短促高亮一次，避免一直闪
+  if(changed && chip.classList){
+    chip.classList.remove("delta-flash");
+    void chip.offsetWidth;
+    chip.classList.add("delta-flash");
+    setTimeout(()=>chip.classList.remove("delta-flash"),1200);
+  }
+}
+
+const PROFILE_NUMBERS = {age:[1,200],height:[30,300],weight:[2,500]};
+function profileLockOptions(prefix,edits,fields){
+  return '<fieldset class="profile-locks"><legend>随剧情变化的资料</legend>'
+    +Object.entries(fields).map(([key,label])=>'<label class="check-line"><input type="checkbox" id="'
+      +prefix+'-lock-'+key+'" '+(edits?.[key]?'checked':'')+'> 锁定'+label+'</label>').join("")
+    +'</fieldset>';
+}
+function editedProfileLocks(prefix,existing,changes,optional){
+  const locks = {...existing,...Object.fromEntries(Object.keys(changes).map(key=>[key,true]))};
+  for(const key of optional){
+    if($(prefix+"-lock-"+key).checked) locks[key] = true;
+    else delete locks[key];
+  }
+  return locks;
+}
+function profileNumber(value){
+  return value!==undefined && value!==null && value!=="" && Number.isFinite(Number(value)) ? Number(value) : "";
+}
+function profileChanges(prefix, fields){
+  const changes = {};
+  for(const field of fields){
+    const input = $(prefix+"-"+field);
+    if(input.value.trim()===input.defaultValue.trim()) continue;
+    const value = input.value.trim();
+    const range = PROFILE_NUMBERS[field];
+    if(range && value && !Number.isFinite(Number(value))) throw new Error("请输入有效的数字。");
+    changes[field] = range ? (value ? clamp(Math.round(Number(value)),...range) : undefined) : value;
+  }
+  return changes;
+}
+function reviseProfileAge(person, age, state){
+  person.age = age;
+  person.ageMonths = 0;
+  person.ageInferred = false;
+  person.birthAuto = false;
+  if(age===undefined){ person.birth = null; return; }
+  const now = partsFromDate(clockNow(state));
+  const prior = computeAge(person.birth,now);
+  const birth = prior
+    ? {...person.birth,year:person.birth.year+prior.age-age}
+    : {...now,year:now.year-age};
+  if(birth.month===2 && birth.day===29 && !validDateParts(birth)) birth.day = 28;
+  person.birth = validDateParts(birth) ? birth : null;
+  if(person.birth) syncAge(person,now);
+  if(person.adult!==undefined) person.adult = !person.group && age>=18;
+}
+function rememberProfileAlias(person, oldName, name){
+  if(!oldName || oldName===name) return;
+  person.profileAliases = [...new Set([...(person.profileAliases||[]),oldName])]
+    .filter(alias=>alias!==name).slice(-12);
+}
+function validateProfileName(name, person = null){
+  if(!name) throw new Error("姓名不能为空。");
+  if((S.cast||[]).some(c=>c && c!==person && (c.name===name || c.profileAliases?.includes(name)))
+    || (person && [S.playerIdentity?.name,S.worldRole?.name,...(S.playerProfileAliases||[])].includes(name))){
+    throw new Error("这个名字已被另一个角色使用。");
+  }
+}
+async function saveProfileForm(button, note, apply, finish){
+  if(activeTurn){
+    note.textContent = "这一幕正在生成。输入的内容已保留，生成结束后即可保存。";
+    return;
+  }
+  const cancel = button.parentElement.querySelector(".ghost");
+  try{
+    apply();
+    button.disabled = true;
+    cancel.disabled = true;
+    note.textContent = "正在保存资料……";
+    await saveProgress(true,{allowOpening:true,reportError:true});
+    if(!button.isConnected) return;
+    finish();
+    refreshStats();
+    refreshSide();
+    renderTalkTarget();
+    $("save-status").textContent = "人物资料已保存";
+  }catch(error){
+    note.textContent = error.message || "资料保存失败，请重试。";
+  }finally{
+    button.disabled = false;
+    cancel.disabled = false;
+  }
+}
+
+/* 人物详情页（玩家与 NPC 共用）：头部只有头像与名字，底部只有修订与返回。
+   头像的生成/更换按钮不放详情页里，避免和资料混在一起。 */
+function detailHead(avatarHtml,name,metaText){
+  return '<div class="self-head">'+avatarHtml
+    +'<div class="self-head-info"><div class="self-name">'+escapeHtml(name)+'</div>'
+    +'<div class="self-meta">'+escapeHtml(metaText||"")+'</div></div></div>';
+}
+function detailActions(editLabel,editId,backId){
+  return '<div class="card-btns">'
+    +'<button class="big-btn ghost" id="'+escapeHtml(editId)+'">'+escapeHtml(editLabel)+'</button>'
+    +'<button class="big-btn ghost" id="'+escapeHtml(backId)+'">返回人物列表</button></div>';
+}
+
+/* 剧情页顶部「当前目标」：篇章目标锁定在最上方，本幕子目标单独一行，
+   再给阻力与下一步，避免目标逐幕漂移、玩家不知道自己在追什么。 */
+function goalCardHtml(state){
+  const plot = (state.plot && typeof state.plot==="object") ? state.plot : {};
+  const chapter = (state.chapter && typeof state.chapter==="object") ? state.chapter : {};
+  const chapterGoal = String(chapter.goal || "").trim();
+  const sceneGoal = String(plot.goal || "").trim();
+  const goal = chapterGoal || sceneGoal;
+  const sub = chapterGoal && sceneGoal && sceneGoal !== chapterGoal ? sceneGoal : "";
+  const conflict = String(plot.conflict || chapter.stakes || "").trim();
+  const next = String(plot.next || chapter.next || "").trim();
+  return '<div class="quest-item goal-card"><div class="qt">当前目标</div>'
+    + (goal
+      ? '<div class="goal-main">'+escapeHtml(goal)+'</div>'
+      : '<div class="qd">还没有明确的目标。先和人聊聊，或四处走走。</div>')
+    + (sub ? '<div class="goal-sub"><b>本幕 · </b>'+escapeHtml(sub)+'</div>' : "")
+    + (conflict ? '<div class="qd"><b>阻力 · </b>'+escapeHtml(conflict)+'</div>' : "")
+    + (next ? '<div class="qd"><b>下一步 · </b>'+escapeHtml(next)+'</div>' : "")
+    + '</div>';
 }
 
 function refreshSide(){
@@ -688,78 +1216,210 @@ function refreshSide(){
     const card = (heading,content)=>'<div class="quest-item"><div class="qt">'+escapeHtml(heading)+'</div>'+content+'</div>';
     const itemCardsHtml = S.items.length
       ? card("物品与线索",'<div class="item-list">'+S.items.map((it,i)=>{
-          const meta=[(it.qty>1?("×"+it.qty):""),(Number.isFinite(it.value)&&it.value>0?("约 "+it.value+" "+curName(S)):""),(it.effect?"可用":"")].filter(Boolean).join(" · ");
+          const meta=[(it.qty>1?("×"+it.qty):""),(Number.isFinite(it.value)&&it.value>0?("约 "+it.value+" "+curName(S)):""),(it.effect?itemEffectText(it.effect):"")].filter(Boolean).join(" · ");
           return '<div class="item-row"><span class="iname">'+escapeHtml(it.name)+'</span>'
             + (it.desc?'<span class="idesc">'+escapeHtml(it.desc)+'</span>':'')
             + (meta?'<span class="imeta">'+escapeHtml(meta)+'</span>':'')
-            + (it.effect?'<button type="button" class="item-use" data-use="'+i+'">使用</button>':'')+'</div>';
+            + '<span class="item-acts"><button type="button" class="item-use item-look" data-look="'+i+'">查看</button>'
+            + (it.effect?'<button type="button" class="item-use" data-use="'+i+'">使用</button>':'')
+            + '<button type="button" class="item-use" data-show="'+i+'">出示</button></span></div>';
         }).join("")+'</div>') : "";
     const abilityCardsHtml = S.abilities.length
       ? card("习得能力",'<div class="qd">'+S.abilities.map(a=>escapeHtml(a.name)).join("、")+'</div>') : "";
+    // 标签文案固定为「物品」，数量只在面板里显示，避免标签被数字挤窄。
     const itemTab = document.querySelector('.side-tab[data-tab="items"]');
-    if(itemTab) itemTab.textContent = "物品"+(S.items.length ? " "+S.items.length : "");
+    if(itemTab) itemTab.textContent = "物品";
     if(tab==="items"){
+      const count = S.items.length;
       body.innerHTML = (itemCardsHtml || card("物品与线索",'<div class="empty">还没有物品。调查中获得的证物、钥匙、信件、照片、账本会出现在这里。</div>'))
+        + (count ? '<div class="quest-sub">共 '+count+' 件</div>' : "")
         + abilityCardsHtml
         + (memories.length ? card("已掌握线索",'<div class="qd">'+memories.map(m=>escapeHtml(m)).join("<br>")+'</div>') : "");
     }else if(tab==="char"){
+      if(playerEditMode){
+        if($("pe-save")) return;
+        const pi = S.playerIdentity || {};
+        const career = CAREERS[S.career];
+        const playerIdentity = pi.identity || (S.worldRole && S.worldRole.identity) || (career && career.identity) || "";
+        body.innerHTML = `
+          <div class="role-editor">
+            <label>姓名<input id="pe-name" maxlength="60" value="${escapeHtml(String(pi.name || (S.worldRole && S.worldRole.name) || "你"))}"></label>
+            <div class="role-edit-row"><label>性别<input id="pe-gender" maxlength="10" value="${escapeHtml(String(S.gender || ""))}"></label><label>年龄<input id="pe-age" type="number" min="1" max="200" value="${profileNumber(S.age)}"></label></div>
+            <div class="role-edit-row"><label>身高 cm<input id="pe-height" type="number" min="30" max="300" value="${profileNumber(S.height)}"></label><label>体重 kg<input id="pe-weight" type="number" min="2" max="500" value="${profileNumber(S.weight)}"></label></div>
+            <label>物种<input id="pe-species" maxlength="40" value="${escapeHtml(String(S.species || ""))}"></label>
+            <label>身份<input id="pe-identity" maxlength="200" value="${escapeHtml(String(playerIdentity))}"></label>
+            <label>出身<input id="pe-origin" maxlength="160" value="${escapeHtml(String(S.origin || ""))}"></label>
+            <label>外貌<input id="pe-appearance" maxlength="300" value="${escapeHtml(String(S.appearance || ""))}"></label>
+            <label>衣着<input id="pe-outfit" maxlength="200" value="${escapeHtml(String(S.outfit || ""))}"></label>
+            <label>补充设定<textarea id="pe-desc" rows="3" maxlength="500">${escapeHtml(String(pi.desc || ""))}</textarea></label>
+            ${profileLockOptions("pe",S.playerProfileEdits,{outfit:"衣着"})}
+            <div class="form-note" id="pe-status" role="status"></div>
+            <div class="card-btns"><button type="button" class="big-btn" id="pe-save">保存资料</button><button type="button" class="big-btn ghost" id="pe-cancel">取消</button></div>
+          </div>`;
+        $("pe-cancel").onclick = ()=>{ playerEditMode = false; refreshSide(); };
+        $("pe-save").onclick = e=>saveProfileForm(e.currentTarget,$("pe-status"),()=>{
+          const name = $("pe-name").value.trim();
+          const oldName = S.playerIdentity?.name || S.worldRole?.name;
+          if(name!==oldName) validateProfileName(name);
+          const {identity,desc,...profile} = profileChanges("pe",["identity","desc","gender","age","height","weight","species","origin","appearance","outfit"]);
+          const pi = {...S.playerIdentity,name};
+          if(identity!==undefined) pi.identity = identity;
+          if(desc!==undefined) pi.desc = desc;
+          if(Object.hasOwn(profile,"species")) pi.species = profile.species = profile.species || "人类";
+          S.playerIdentity = pi;
+          if(oldName && oldName!==name){
+            S.playerProfileAliases = [...new Set([...(S.playerProfileAliases||[]),oldName])]
+              .filter(alias=>alias!==name).slice(-12);
+          }
+          if(S.worldRole) S.worldRole = {...S.worldRole,...profile,name,
+            ...(identity!==undefined ? {identity} : {}), ...(desc!==undefined ? {personality:desc} : {})};
+          Object.assign(S,profile);
+          if(Object.hasOwn(profile,"age")) reviseProfileAge(S,profile.age,S);
+          S.playerProfileEdits = editedProfileLocks("pe",S.playerProfileEdits,profile,["outfit"]);
+        },()=>{playerEditMode=false;});
+        return;
+      }
+      if(npcEditName && $("ne-save")) return;
       const editNpc = npcEditName ? (S.cast||[]).find(c=>c && c.name===npcEditName) : null;
       if(editNpc){
         const c = editNpc;
         body.innerHTML = `
           <div class="role-editor">
             <label>姓名<input id="ne-name" maxlength="60" value="${escapeHtml(String(c.name||""))}"></label>
-            <div class="role-edit-row"><label>性别<input id="ne-gender" maxlength="10" value="${escapeHtml(String(c.gender||""))}"></label><label>年龄<input id="ne-age" type="number" min="1" max="200" value="${Number.isFinite(Number(c.age))?Number(c.age):""}"></label></div>
-            <div class="role-edit-row"><label>身高 cm<input id="ne-height" type="number" min="30" max="300" value="${Number.isFinite(Number(c.height))?Number(c.height):""}"></label><label>体重 kg<input id="ne-weight" type="number" min="2" max="500" value="${Number.isFinite(Number(c.weight))?Number(c.weight):""}"></label></div>
+            <div class="role-edit-row"><label>性别<input id="ne-gender" maxlength="10" value="${escapeHtml(String(c.gender||""))}"></label><label>年龄<input id="ne-age" type="number" min="1" max="200" value="${profileNumber(c.age)}"></label></div>
+            <div class="role-edit-row"><label>身高 cm<input id="ne-height" type="number" min="30" max="300" value="${profileNumber(c.height)}"></label><label>体重 kg<input id="ne-weight" type="number" min="2" max="500" value="${profileNumber(c.weight)}"></label></div>
             <label>物种<input id="ne-species" maxlength="40" value="${escapeHtml(String(c.species||""))}"></label>
             <label>身份<input id="ne-identity" maxlength="200" value="${escapeHtml(String(c.identity||""))}"></label>
             <label>职业<input id="ne-job" maxlength="120" value="${escapeHtml(String(c.job||""))}"></label>
+            <label>出身<input id="ne-origin" maxlength="160" value="${escapeHtml(String(c.origin||""))}"></label>
             <label>外貌<input id="ne-appearance" maxlength="300" value="${escapeHtml(String(c.appearance||""))}"></label>
             <label>衣着<input id="ne-outfit" maxlength="200" value="${escapeHtml(String(c.outfit||""))}"></label>
             <label>性格<input id="ne-personality" maxlength="200" value="${escapeHtml(String(c.personality||""))}"></label>
+            <label>说话习惯<input id="ne-voice" maxlength="200" value="${escapeHtml(String(c.voice||""))}"></label>
+            <label>爱好<input id="ne-hobby" maxlength="200" value="${escapeHtml(String(c.hobby||""))}"></label>
             <label>背景<input id="ne-background" maxlength="400" value="${escapeHtml(String(c.background||""))}"></label>
             <label>长期目标<input id="ne-goal" maxlength="200" value="${escapeHtml(String(c.goal||""))}"></label>
             <label>眼下打算<input id="ne-agenda" maxlength="200" value="${escapeHtml(String(c.agenda||""))}"></label>
             <label>对玩家态度<input id="ne-attitude" maxlength="200" value="${escapeHtml(String(c.attitude||""))}"></label>
             <label>关系标签<input id="ne-tie" maxlength="120" value="${escapeHtml(String(c.tie||""))}"></label>
-            <div class="card-btns"><button class="big-btn" id="ne-save">保存修正</button><button class="big-btn ghost" id="ne-cancel">取消</button></div>
+            ${profileLockOptions("ne",c.profileEdits,{attitude:"态度",agenda:"眼下打算",outfit:"衣着"})}
+            <div class="form-note" id="ne-status" role="status"></div>
+            <div class="card-btns"><button type="button" class="big-btn" id="ne-save">保存修正</button><button type="button" class="big-btn ghost" id="ne-cancel">取消</button></div>
           </div>`;
         $("ne-cancel").onclick = ()=>{ npcEditName=""; refreshSide(); };
-        $("ne-save").onclick = ()=>{
+        $("ne-save").onclick = e=>saveProfileForm(e.currentTarget,$("ne-status"),()=>{
+          const c = S.cast.find(person=>person && person.name===npcEditName);
+          if(!c) throw new Error("当前旅途中找不到这个角色。");
           const oldName = c.name;
           const name = $("ne-name").value.trim();
-          if(!name){ alert("姓名不能为空"); return; }
-          const num = (id,min,max)=>{ const n=Number($(id).value); return Number.isFinite(n)?Math.max(min,Math.min(max,Math.round(n))):undefined; };
+          validateProfileName(name,c);
+          const fields = ["gender","age","height","weight","species","identity","job","origin","appearance","outfit","personality","voice","hobby","background","goal","agenda","attitude","tie"];
+          const changes = profileChanges("ne",fields);
+          Object.assign(c,changes);
+          if(Object.hasOwn(changes,"age")) reviseProfileAge(c,changes.age,S);
+          c.profileEdits = editedProfileLocks("ne",c.profileEdits,changes,["attitude","agenda","outfit"]);
+          if(name!==oldName) c.profileEdits.name = true;
           c.name = name;
-          c.gender = $("ne-gender").value.trim();
-          c.age = num("ne-age",1,200);
-          c.height = num("ne-height",30,300);
-          c.weight = num("ne-weight",2,500);
-          c.species = $("ne-species").value.trim();
-          c.identity = $("ne-identity").value.trim();
-          c.job = $("ne-job").value.trim();
-          c.appearance = $("ne-appearance").value.trim();
-          c.outfit = $("ne-outfit").value.trim();
-          c.personality = $("ne-personality").value.trim();
-          c.background = $("ne-background").value.trim();
-          c.goal = $("ne-goal").value.trim();
-          c.agenda = $("ne-agenda").value.trim();
-          c.attitude = $("ne-attitude").value.trim();
-          c.tie = $("ne-tie").value.trim();
+          rememberProfileAlias(c,oldName,name);
           if(oldName!==name){
             S.present = (S.present||[]).map(n=>n===oldName?name:n);
             if(S.talkTarget===oldName) S.talkTarget = name;
-            if(S.aff && oldName in S.aff){ S.aff[name]=S.aff[oldName]; delete S.aff[oldName]; }
-            if(S.intimacy && oldName in S.intimacy){ S.intimacy[name]=S.intimacy[oldName]; delete S.intimacy[oldName]; }
+            if(S.initiator===oldName) S.initiator = name;
+            for(const map of [S.aff,S.intimacy,S.lastVisit,S.npcDesireInit]){
+              if(map && Object.hasOwn(map,oldName)){ map[name]=map[oldName]; delete map[oldName]; }
+            }
             for(const p of (S.cast||[])) if(Array.isArray(p.links)) p.links = p.links.map(l=>l && l.name===oldName?{...l,name}:l);
-            for(const l of (S.openLoops||[])) if(Array.isArray(l.participants)) l.participants = l.participants.map(n=>n===oldName?name:n);
+            for(const l of [...(S.openLoops||[]),...(S.loopHistory||[])]){
+              for(const key of ["participants","knownBy"]){
+                if(Array.isArray(l[key])) l[key] = l[key].map(n=>n===oldName?name:n);
+              }
+              if(l.playerPromise?.who===oldName) l.playerPromise.who = name;
+              if(l.npcAction?.who===oldName) l.npcAction.who = name;
+            }
+            for(const plan of (S.npcPlans||[])){
+              if(plan.who===oldName) plan.who = name;
+              if(Array.isArray(plan.knownBy)) plan.knownBy = plan.knownBy.map(n=>n===oldName?name:n);
+            }
           }
           ensureNpcDefaults(c,S);
-          npcDetailName = name;
+          npcEditName = name;
+        },()=>{
+          npcDetailName = npcEditName;
           npcEditName = "";
-          saveProgress();
-          refreshSide();
-        };
+        });
+        return;
+      }
+      // 「你自己」的详情页：完整资料 + 头像按钮 + 修订入口。
+      if(playerDetail){
+        const career = CAREERS[S.career];
+        const roleName = S.worldRole && S.worldRole.name;
+        const pi = S.playerIdentity;
+        const playerName = (pi && pi.name) || roleName || "你";
+        const playerSpecies = S.species || (pi && pi.species) || (S.worldRole && S.worldRole.species) || "人类";
+        const reputation = localReputation(S);
+        let avatarFile = "";
+        if(!S.avatarKey && typeof AVATAR_LIB!=="undefined"){
+          const sid = pickAvatarFor({name:playerName,species:playerSpecies,gender:S.gender||"",age:S.age,identity:(pi&&pi.identity)||"",tie:"玩家本人"}, new Set());
+          if(sid && AVATAR_LIB[sid]) avatarFile = AVATAR_LIB[sid].file;
+        }
+        const avatar = S.avatarKey
+          ? '<img class="self-avatar" data-avatar-key="'+escapeHtml(S.avatarKey)+'" alt="">'
+          : (avatarFile
+            ? '<img class="self-avatar" src="avatars/'+encodeURIComponent(avatarFile)+'" alt="">'
+            : '<div class="self-avatar npc-avatar-fallback">'+escapeHtml(String(playerName).slice(0,1))+'</div>');
+        const head = detailHead(avatar, playerName,
+          [(pi&&pi.identity)||(S.worldRole&&S.worldRole.identity)||(career&&career.identity)||"",playerSpecies,S.gender].filter(Boolean).join(" · "));
+        const combatHtml = S.combat ? (function(){
+          const cp = typeof combatProfileFor==="function" ? combatProfileFor(S) : null;
+          const tn = (S.combat.techniques||[]).map(t=>t.name+(t.cost?("（耗"+t.cost+"）"):"")).join("、") || "无";
+          return card(cp?cp.power:"武力", row("武力",String(S.combat.power||0))+row(cp?cp.energy:"内力",(S.combat.energy||0)+"/"+(S.combat.energyMax||0))+row(cp?cp.technique:"绝技",tn));
+        })() : "";
+        body.innerHTML = head
+          + detailActions("修订我的资料", "self-edit", "self-detail-back")
+          + card("基本资料", row("身份", pi
+              ? pi.name+(pi.identity ? "（"+pi.identity+"）" : "")
+              : (roleName ? roleName+(S.worldRole.identity ? "（"+S.worldRole.identity+"）" : "")
+                : (career ? career.name+"（"+career.identity+"）" : "无职业")))
+            +row("年龄",Number.isFinite(S.age) ? (S.age+" 岁"+(S.ageMonths ? (" "+S.ageMonths+" 个月") : "")) : "未定")
+            +row("生日",S.birth ? formatDateParts(S.birth,false) : "")
+            +row("性别",S.gender||"未定")
+            +row("出身",S.origin||"未定")
+            +row("身高",S.height ? S.height+" cm" : "未定")
+            +row("体重",S.weight ? S.weight+" kg" : "未定"))
+          + card("外貌与生活", row("外貌",S.appearance||"未定")+row("衣着",S.outfit||"未定"))
+          + card("状态与声望",
+            row("体力",staminaLabel(S)+"（"+S.hp+"/"+(S.hpMax||100)+"）")
+            +row("健康",(S.health??100)+"（"+attrLabel(S.health??100)+"）")
+            +row("声望",(reputation.scope||"此地")+" · "+reputation.label)
+            +row("口碑的影响",reputation.guide)
+            +row("最近的传闻",reputation.reason)
+            +row("欲望",DRIVE_KEYS.map(k=>DRIVE_META[k].label+" "+(S.desires?.[k]??0)).join(" · "))
+            +((S.debt||0)>0 ? row("欠债",S.debt+" "+curName(S)) : "")
+            +(career ? row("处境",career.standing) : ""))
+          + card("属性",
+            row("智商",(S.iq??50)+"（"+attrLabel(S.iq??50)+"）")
+            +row("体质",(S.physique??50)+"（"+attrLabel(S.physique??50)+"）")
+            +row("魅力",(S.charm??50)+"（"+attrLabel(S.charm??50)+"）")
+            +row("意志",(S.willpower??50)+"（"+attrLabel(S.willpower??50)+"）")
+            +row("敏捷",(S.agility??50)+"（"+attrLabel(S.agility??50)+"）"))
+          + combatHtml
+          + (combatProfileFor(S)?.id==="wuxia" ? card("修习进度",row("修习",martialTrainingText(S))) : "")
+          + card("技能",
+            row("技能",Object.keys(S.skills||{}).length
+              ? Object.entries(S.skills).map(([k,v])=>k+" "+v+"（"+skillLevel(v)+"）").join("、") : "无"))
+          + card("财务",
+            ((S.incomePerDay||0)>0 || S.incomePlan ? row("收入",incomePlanText(S.incomePlan,S.incomePerDay||0)) : "")
+            +row("存款",Number.isFinite(S.savings) ? (S.savings+" "+curName(S)) : "未记录")
+            +row("随身现金",Number.isFinite(S.coin) ? S.coin+" "+curName(S) : "")
+            +row("食物",(S.food||0)+" 份")
+            +row("资产",assetsText(S.assets)));
+        body.querySelectorAll("img[data-avatar-key]").forEach(async img=>{
+          try{ const data = await imageGet(img.dataset.avatarKey); if(data) img.src = data; }catch(e){}
+        });
+        const back = $("self-detail-back");
+        if(back) back.onclick = ()=>{ playerDetail = false; refreshSide(); };
+        const edit = $("self-edit");
+        if(edit) edit.onclick = ()=>{ playerEditMode = true; playerDetail = false; npcDetailName = ""; npcEditName = ""; refreshSide(); };
         return;
       }
       const detailNpc = npcDetailName ? (S.cast||[]).find(c=>c && c.name===npcDetailName && !c.dead) : null;
@@ -787,8 +1447,10 @@ function refreshSide(){
           +row("内力",(c.combat.energy||0)+"/"+(c.combat.energyMax||0))
           +row("绝技",(c.combat.techniques||[]).map(t=>t.name).join("、")||"无") : "";
         const links = (c.links||[]).map(l=>l.name+(l.relation?("（"+l.relation+"）"):"")+(Number.isFinite(l.aff)?(" 好感"+l.aff):"")).join("；");
-        const memoriesText = (c.memories||[]).slice(-4).reverse().map(m=>"第"+(m.turn||"?")+"幕："+m.text).join("<br>");
-        body.innerHTML = '<div class="self-head">'+avatar+'<div class="self-head-info"><div class="self-name">'+escapeHtml(c.name)+'</div><div class="self-meta">'+escapeHtml([c.identity||c.job,c.species,c.age?c.age+"岁":"",c.gender].filter(Boolean).join(" · "))+'</div><button type="button" class="npc-gen" data-gen-avatar="'+escapeHtml(c.name)+'">'+(c.avatarKey?"重生成":"生成头像")+'</button></div></div>'
+        const memoriesText = (c.memories||[]).slice(-4).reverse().map(m=>escapeHtml("第"+(m.turn||"?")+"幕："+m.text)).join("<br>");
+        body.innerHTML = detailHead(avatar, c.name,
+          [c.identity||c.job,c.species,c.age?c.age+"岁":"",c.gender].filter(Boolean).join(" · "))
+          + detailActions("修订资料", "npc-detail-edit", "npc-detail-back")
           + card("基本资料", row("姓名",c.name)+row("身份",c.identity||c.job)+row("职业",c.job)
             +row("年龄",c.age?c.age+" 岁":"未记录")+row("性别",c.gender||"未记录")
             +row("物种",c.species||"人类")+row("出身",c.origin)
@@ -797,29 +1459,20 @@ function refreshSide(){
             +row("作息",c.routine)+row("说话习惯",c.voice)+row("爱好",c.hobby))
           + card("性格与动机", row("性格",c.personality)+row("背景",c.background)
             +row("长期目标",c.goal)+row("眼下打算",c.agenda)+row("对玩家的态度",c.attitude))
-          + card("关系与状态", row("与玩家关系",[tierLabel,aff?("好感 "+aff):"",intim?("亲密 "+intim):""].filter(Boolean).join(" · "))
+          + card("关系与状态", row("与玩家关系",[tierLabel,aff?("好感 "+(aff>0?"+":"")+aff):"",intim?("亲密 "+intim):""].filter(Boolean).join(" · "))
             +row("与玩家关系标签",c.tie)+row("人物关系网",links)+row("状态",status+(c.dead?"":" · 体力 "+(c.hp??100)))
             +row("财产",c.wealth)+row("随身现金",Number.isFinite(c.coin)?c.coin+" "+curName(S):"")
             +row("声望",Number.isFinite(c.rep)?c.rep:"")+row("道德",Number.isFinite(c.moral)?c.moral:"")+row("通缉",Number.isFinite(c.wanted)?c.wanted:""))
-          + attrs + (combat ? card("武力",combat) : "")
-          + (memoriesText ? card("最近经历",'<div class="qd">'+memoriesText+'</div>') : "")
-          + '<div class="card-btns"><button class="big-btn ghost" id="npc-detail-edit">修订资料</button><button class="big-btn ghost" id="npc-detail-back">返回人物列表</button></div>';
+          + (attrs ? card("属性",attrs) : "")
+          + (combat ? card("武力",combat) : "")
+          + (memoriesText ? card("最近经历",'<div class="qd">'+memoriesText+'</div>') : "");
         body.querySelectorAll("img[data-avatar-key]").forEach(async img=>{
           try{ const data = await imageGet(img.dataset.avatarKey); if(data) img.src = data; }catch(e){}
-        });
-        body.querySelectorAll("[data-gen-avatar]").forEach(btn=>{
-          btn.onclick = async ()=>{
-            if(btn.disabled) return;
-            const old = btn.textContent;
-            btn.disabled = true; btn.textContent = "生成中…";
-            try{ await generateNpcAvatar(btn.dataset.genAvatar); }
-            catch(e){ btn.disabled=false; btn.textContent = old; alert("生成失败："+e.message); }
-          };
         });
         const back = $("npc-detail-back");
         if(back) back.onclick = ()=>{ npcDetailName = ""; refreshSide(); };
         const edit = $("npc-detail-edit");
-        if(edit) edit.onclick = ()=>{ npcEditName = c.name; npcDetailName = ""; refreshSide(); };
+        if(edit) edit.onclick = ()=>{ npcEditName = c.name; npcDetailName = ""; playerEditMode = false; refreshSide(); };
         return;
       }
       const present = Array.isArray(S.present)
@@ -843,48 +1496,27 @@ function refreshSide(){
       const selfAvatar = S.avatarKey
         ? '<img class="self-avatar" data-avatar-key="'+escapeHtml(S.avatarKey)+'" alt="">'
         : (selfAvatarFile ? '<img class="self-avatar" src="avatars/'+encodeURIComponent(selfAvatarFile)+'" alt="">' : '<div class="self-avatar npc-avatar-fallback">'+escapeHtml(String(playerName).slice(0,1))+'</div>');
-      const selfHead = '<div class="self-head">'+selfAvatar+'<div class="self-head-info"><div class="self-name">'+escapeHtml(playerName)+'</div><div class="self-meta">'+escapeHtml(playerIdentity||playerSpecies||"")+'</div><button type="button" class="npc-gen" data-gen-player="1">'+(S.avatarKey?"重生成":"生成头像")+'</button></div></div>';
-      const selfAttrs = card("你自己",
-        selfHead + row("身份", pi
-          ? pi.name+(pi.identity ? "（"+pi.identity+"）" : "")
-          : (roleName
-            ? roleName+(S.worldRole.identity ? "（"+S.worldRole.identity+"）" : "")
-            : (career ? career.name+"（"+career.identity+"）" : "无职业")))
-        +row("年龄",Number.isFinite(S.age) ? (S.age+" 岁"+(S.ageMonths ? (" "+S.ageMonths+" 个月") : "")) : "未定")
-        +row("生日",S.birth ? formatDateParts(S.birth,false) : "")
-        +row("性别",S.gender||"未定")
-        +row("出身",S.origin||"未定")
-        +row("身高",S.height ? S.height+" cm" : "未定")
-        +row("体重",S.weight ? S.weight+" kg" : "未定")
-        +row("外貌",S.appearance||"未定")
-        +row("衣着",S.outfit||"未定")
-        +((S.incomePerDay||0)>0 || S.incomePlan ? row("收入",incomePlanText(S.incomePlan,S.incomePerDay||0)) : "")
-        +row("存款",Number.isFinite(S.savings) ? (S.savings+" "+curName(S)) : "未记录")
-        +row("食物",(S.food||0)+" 份")
-        +row("资产",assetsText(S.assets))
-         +row("体力",staminaLabel(S)+"（"+S.hp+"/"+(S.hpMax||100)+"）")
-         +row("声望",(reputation.scope || "此地")+" · "+reputation.label)
-         +row("口碑的影响",reputation.guide)
-         +row("最近的传闻",reputation.reason)
-        +row("智商",(S.iq??50)+"（"+attrLabel(S.iq??50)+"）")
-        +row("体质",(S.physique??50)+"（"+attrLabel(S.physique??50)+"）")
-        +row("魅力",(S.charm??50)+"（"+attrLabel(S.charm??50)+"）")
-        +row("意志",(S.willpower??50)+"（"+attrLabel(S.willpower??50)+"）")
-        +row("敏捷",(S.agility??50)+"（"+attrLabel(S.agility??50)+"）")
-        +row("体力",(S.hp)+" / "+(S.hpMax||100))
-        +row("欲望",DRIVE_KEYS.map(k=>DRIVE_META[k].label+" "+(S.desires?.[k]??0)).join(" · "))
-        +row("健康",(S.health??100)+"（"+attrLabel(S.health??100)+"）")
-        +(S.combat ? (function(){
-          const cp = typeof combatProfileFor==="function" ? combatProfileFor(S) : null;
-          const tn = (S.combat.techniques||[]).map(t=>t.name+(t.cost?("（耗"+t.cost+"）"):"")).join("、") || "无";
-          return row(cp?cp.power:"武力",String(S.combat.power||0))+row(cp?cp.energy:"内力",(S.combat.energy||0)+"/"+(S.combat.energyMax||0))+row(cp?cp.technique:"绝技",tn);
-        })() : "")
-        +(combatProfileFor(S)?.id==="wuxia" ? row("修习进度",martialTrainingText(S)) : "")
-        +((S.debt||0)>0 ? row("欠债",S.debt+" "+curName(S)) : "")
-        +row("技能",Object.keys(S.skills||{}).length
-          ? Object.entries(S.skills).map(([k,v])=>k+" "+v+"（"+skillLevel(v)+"）").join("、") : "无")
-        +(career ? row("处境",career.standing) : "")
-      );
+      const selfHead = '<div class="self-head">'+selfAvatar+'<div class="self-head-info"><div class="self-name">'+escapeHtml(playerName)+'</div><div class="self-meta">'+escapeHtml(playerIdentity||playerSpecies||"")+'</div></div></div>';
+      // 列表里只放一张精简卡片，完整资料点「详情」再看。
+      const selfMeta = [
+        playerIdentity,
+        Number.isFinite(S.age) ? S.age+"岁" : "",
+        playerGender,
+        playerSpecies,
+        (reputation.scope||"此地")+" · "+reputation.label
+      ].filter(Boolean).slice(0,5).join(" · ");
+      const selfDesc = [S.appearance,S.outfit].filter(Boolean).join(" · ");
+      const selfCard = '<div class="npc-card"><div class="npc-avatar self-avatar">'
+        + (S.avatarKey ? '<img data-avatar-key="'+escapeHtml(S.avatarKey)+'" alt="">'
+          : (selfAvatarFile ? '<img src="avatars/'+encodeURIComponent(selfAvatarFile)+'" alt="">'
+            : '<span class="npc-avatar-fallback">'+escapeHtml(String(playerName).slice(0,1))+'</span>'))
+        + '</div><div class="npc-info"><div class="npc-name">'+escapeHtml(playerName)+'</div>'
+        + '<div class="npc-meta">'+escapeHtml(selfMeta||"身份未明")+'</div>'
+        + (selfDesc?'<div class="npc-desc">'+escapeHtml(selfDesc)+'</div>':'')+'</div>'
+        + '<div class="npc-actions"><button type="button" class="npc-gen" data-self-detail="1">详情</button>'
+        + '<button type="button" class="npc-gen" data-gen-player="1">'+(S.avatarKey?"重生成":"生成头像")+'</button>'
+        + '<button type="button" class="npc-gen" data-pick-player="1">选择图片</button></div></div>';
+      const selfAttrs = card("你自己", selfCard);
       const socialCards = (S.social||[]).length
         ? card("社会关系",'<div class="qd">'+S.social.map(r=>escapeHtml(r.name+(r.relation?"（"+r.relation+"）":"")+(r.power?" · "+r.power:"")+(r.attitude?" · "+r.attitude:""))).join("<br>")+'</div>')
         : "";
@@ -907,7 +1539,7 @@ function refreshSide(){
           c.combat ? ("武力 "+c.combat.power) : ""
         ].filter(Boolean).slice(0,5).join(" · ");
         const desc = [c.appearance,c.outfit].filter(Boolean).join(" · ");
-        return '<div class="npc-card">'+avatar+'<div class="npc-info"><div class="npc-name">'+escapeHtml(c.name)+'</div><div class="npc-meta">'+escapeHtml(meta||"身份未明")+'</div>'+(desc?'<div class="npc-desc">'+escapeHtml(desc)+'</div>':'')+'</div><div class="npc-actions"><button type="button" class="npc-gen" data-npc-detail="'+escapeHtml(c.name)+'">详情</button><button type="button" class="npc-gen" data-gen-avatar="'+escapeHtml(c.name)+'">'+(c.avatarKey?"重生成":"生成头像")+'</button></div></div>';
+        return '<div class="npc-card">'+avatar+'<div class="npc-info"><div class="npc-name">'+escapeHtml(c.name)+'</div><div class="npc-meta">'+escapeHtml(meta||"身份未明")+'</div>'+(desc?'<div class="npc-desc">'+escapeHtml(desc)+'</div>':'')+'</div><div class="npc-actions"><button type="button" class="npc-gen" data-npc-detail="'+escapeHtml(c.name)+'">详情</button><button type="button" class="npc-gen" data-gen-avatar="'+escapeHtml(c.name)+'">'+(c.avatarKey?"重生成":"生成头像")+'</button><button type="button" class="npc-gen" data-pick-avatar="'+escapeHtml(c.name)+'">选择图片</button></div></div>';
       }).join("");
       const groupCards = (S.cast||[]).filter(c=>c && c.name && !c.dead && !c.offstage && c.group).slice(0,8).map(c=>{
         const info = [c.identity || c.job, c.attitude, c.hp<100 ? "受挫" : ""].filter(Boolean).join(" · ");
@@ -941,6 +1573,15 @@ function refreshSide(){
           catch(e){ btn.disabled=false; btn.textContent = old; alert("生成失败："+e.message); }
         };
       });
+      body.querySelectorAll("[data-pick-avatar]").forEach(btn=>{
+        btn.onclick = ()=>openAvatarPicker("npc",btn.dataset.pickAvatar);
+      });
+      body.querySelectorAll("[data-pick-player]").forEach(btn=>{
+        btn.onclick = ()=>openAvatarPicker("player");
+      });
+      body.querySelectorAll("[data-self-detail]").forEach(btn=>{
+        btn.onclick = ()=>{ playerDetail = true; npcDetailName = ""; npcEditName = ""; playerEditMode = false; refreshSide(); };
+      });
     }else if(tab==="story"){
       const ch = S.chapter || null;
       const loops = (S.openLoops||[]).slice(-8).reverse();
@@ -964,7 +1605,7 @@ function refreshSide(){
       const compareName = tls.find(t=>t.id===timelineCompareId)?.name || "未选择";
       const compareRow = (label,a,b)=>'<div class="tl-compare-row"><span>'+escapeHtml(label)+'</span><b>'+escapeHtml(String(a??"—"))+'</b><b>'+escapeHtml(String(b??"—"))+'</b></div>';
       const compareHtml = compare ? '<div class="tl-compare">'
-        +'<div class="tl-compare-head"><span>项目</span><b>当前 · '+(currentTimeline(S)?.name||"")+'</b><b>'+escapeHtml(compareName)+'</b></div>'
+        +'<div class="tl-compare-head"><span>项目</span><b>当前 · '+escapeHtml(currentTimeline(S)?.name||"")+'</b><b>'+escapeHtml(compareName)+'</b></div>'
         +compareRow("幕数",currentSummary.turn,compare.turn)
         +compareRow("场景",currentSummary.scene,compare.scene)
         +compareRow("篇章",currentSummary.chapter,compare.chapter)
@@ -977,28 +1618,99 @@ function refreshSide(){
       const snapStats = typeof timelineSnapshotStats==="function" ? timelineSnapshotStats(S) : {count:0,bytes:0};
       const timelineCard = card("时间线", '<div class="tl-list">'+timelineRows+'</div>'
         +'<button class="big-btn ghost" id="btn-branch-timeline">从当前幕创建分支</button>'
-        +'<div class="tl-storage">本地快照 '+snapStats.count+' 个 · 约 '+Math.max(1,Math.round(snapStats.bytes/1024))+' KB</div>'
+        +'<div class="tl-storage">本地快照 '+snapStats.count+' 个 · 约 '+Math.max(1,Math.round(snapStats.bytes/1024))+' KB（最多保留 '+TIMELINE_SNAP_LIMIT+' 个，旧的会自动清理）</div>'
         +compareHtml);
+      const chapterAge = ch && Number.isFinite(ch.startedMinute) && Number.isFinite(S.environment?.minute)
+        ? Math.max(0,S.environment.minute-ch.startedMinute) : null;
       const chapterCard = ch
-        ? card("当前篇章", row("篇章", ch.title)+row("目标", ch.goal)+row("筹码与代价", ch.stakes)+row("下一步", ch.next)+row("阶段", Object.hasOwn(CHAPTER_PHASES,ch.phase) ? CHAPTER_PHASES[ch.phase] : ch.phase)+row("余波",ch.outcome))
+        ? card("当前篇章", row("篇章", ch.title)+row("筹码与代价", ch.stakes)
+          +row("阶段", Object.hasOwn(CHAPTER_PHASES,ch.phase) ? CHAPTER_PHASES[ch.phase] : ch.phase)
+          +row("已持续", chapterAge!==null ? formatDuration(chapterAge) : "")
+          +row("目标改道", ch.previousGoal ? "第 "+(ch.goalChangedTurn||"?")+" 幕改写自「"+ch.previousGoal+"」" : "")
+          +row("余波",ch.outcome))
         : card("当前篇章", '<div class="empty">还没有篇章信息。持续几幕或开启新故事后，AI 会建立当前篇章。</div>');
       const chapterHistory = (S.chapterHistory||[]).slice(-4).reverse().map(c=>row(c.title,c.outcome)).join("");
+      // 委托：玩家已接下的活儿，含回报与状态。
+      const activeQuests = (S.quests||[]).filter(q=>!q.done && !q.abandoned);
+      const doneQuests = (S.quests||[]).filter(q=>q.done);
+      const questCardHtml = (q,state)=>{
+        const meta = [];
+        if(Number.isFinite(q.addedTurn)) meta.push("第 "+q.addedTurn+" 幕接到");
+        if(q.reward && (Number.isFinite(q.reward.coin)||Number.isFinite(q.reward.rep))){
+          const parts = [];
+          if(Number.isFinite(q.reward.coin)) parts.push(q.reward.coin+" "+curName(S));
+          if(Number.isFinite(q.reward.rep)) parts.push("声望 +"+q.reward.rep);
+          meta.push("回报约 "+parts.join(" · "));
+        }
+        return '<div class="quest-item'+(q.done?' done':'')+'">'
+          +'<div class="qt">'+(q.done?'✓ ':'')+escapeHtml(q.title||"一桩事")+'</div>'
+          +(q.desc?'<div class="qd">'+escapeHtml(q.desc)+'</div>':'')
+          +(meta.length?'<div class="qstat" style="color:var(--muted)">'+escapeHtml(meta.join(" · "))+'</div>':'')
+          +'<div class="qstat">'+escapeHtml(state)+'</div></div>';
+      };
+      const doneList = doneQuests.length
+        ? '<div class="quest-sub">已了结</div>'+doneQuests.map(q=>questCardHtml(q,"已了结")).join("")
+        : "";
+      const questCard = card("委托",
+        (activeQuests.map(q=>questCardHtml(q,"还在进行")).join("") + doneList)
+          || '<div class="empty">眼下还没有挂心的事。<br>在酒馆里和人聊聊，<br>或许会听到什么。</div>');
       const loopCards = loops.length
         ? card("未了事项", '<div class="loop-list">'+loops.map(l=>{
+            const p = l.playerPromise;
             const ageMinutes = Number.isFinite(l.createdMinute) && Number.isFinite(S.environment?.minute)
             ? Math.max(0,S.environment.minute-l.createdMinute) : null;
             const age = Number.isFinite(l.createdTurn) && Number.isFinite(S.turn) ? Math.max(0,S.turn-l.createdTurn) : null;
             const meta = [l.kind,
+              p ? "承诺" : "",
               ageMinutes!==null ? ("已悬 "+formatDuration(ageMinutes)) : (age!==null?("已悬 "+age+" 幕"):""),
               l.dueMinute ? ("约 "+formatStoryTime(l.dueMinute,S)) : (l.dueTurn?("预计第 "+l.dueTurn+" 幕"):""),
               (l.participants||[]).join("、")].filter(Boolean).join(" · ");
-            return '<div class="loop-row"><span class="loop-text">'+escapeHtml(l.text||"")+'</span>'+(meta?'<span class="loop-meta">'+escapeHtml(meta)+'</span>':'')+'</div>';
+            return '<div class="loop-row"><span class="loop-text">'+escapeHtml(l.text||"")+'</span>'
+              +(p?'<span class="loop-meta">对 '+escapeHtml(p.who)+'：'+escapeHtml(p.action||"")+'</span>':'')
+              +(p && (p.kept||p.missed) ? '<span class="loop-meta">守约 → '+escapeHtml(p.kept||"—")+'<br>失约 → '+escapeHtml(p.missed||"—")+'</span>':'')
+              +(p && p.opportunity ? '<span class="loop-meta">兑现后可以：'+escapeHtml(p.opportunity)+'</span>':'')
+              +(meta?'<span class="loop-meta">'+escapeHtml(meta)+'</span>':'')
+              +'</div>';
           }).join("")+'</div>')
         : card("未了事项", '<div class="empty">当前没有未了事项。</div>');
       const closedCards = closed.length
-        ? card("最近收回", '<div class="qd">'+closed.map(l=>escapeHtml(l.outcome||l.text||"")+" · 第"+(l.resolvedTurn||"?")+"幕").join("<br>")+'</div>')
+        ? card("最近收回", '<div class="qd">'+closed.map(l=>escapeHtml((l.outcome||l.text||"")+" · 第"+(l.resolvedTurn||"?")+"幕")).join("<br>")+'</div>')
         : "";
-      body.innerHTML = timelineCard + chapterCard + (chapterHistory ? card("篇章回顾",chapterHistory) : "") + loopCards + closedCards;
+      const knownActions = (S.npcPlans||[]).filter(p=>p.status==="done" && p.knownBy?.includes("玩家")).slice(-6).reverse();
+      const npcActions = knownActions.length ? card("已知的人物行动",knownActions.map(p=>
+        row(p.who,p.action+" · "+formatStoryTime(p.resolvedMinute,S))).join("")) : "";
+      const metrics = (S.turnStats||[]).slice(-10).reverse();
+      const metricsAvg = metrics.length ? Math.round(metrics.reduce((sum,item)=>sum+(Number(item.ms)||0),0)/metrics.length) : 0;
+      const metricsRetry = metrics.length ? Math.round(metrics.filter(item=>(item.attempts||1)>1).length/metrics.length*100) : 0;
+      const metricsId = metrics.reduce((sum,item)=>sum+(item.identityRetries||0),0);
+      const metricsJson = metrics.reduce((sum,item)=>sum+(item.jsonErrors||0),0);
+      const metricsTokens = metrics.length ? Math.round(metrics.reduce((sum,item)=>sum+(Number(item.contextTokens)||0),0)/metrics.length) : 0;
+      const lastRetry = metrics[0]?.retryReasons||[];
+      const retryReasonLine = lastRetry.length
+        ? lastRetry.map(r=>"第"+(r.attempt||"?")+"次·"+(r.kind||"")+"："+String(r.detail||"").slice(0,80)).join("；")
+        : "无";
+      let saveSizeLabel = "";
+      try{
+        const {world:_world,...rawSave} = S;
+        const pruned = typeof pruneStateForSave==="function" ? pruneStateForSave(rawSave) : rawSave;
+        saveSizeLabel = typeof formatSaveSize==="function"
+          ? formatSaveSize(typeof saveTextBytes==="function" ? saveTextBytes(pruned) : JSON.stringify(pruned).length*2)
+          : "";
+      }catch(e){}
+      const paceLabel = {fast:"快进",detailed:"细致",auto:"自动"};
+      const metricsCard = S.turnStats && S.turnStats.length ? card("生成指标",
+        row("最近 "+metrics.length+" 幕平均",metricsAvg+" ms")
+        +row("重试率",metricsRetry+"%")
+        +row("身份修正",metricsId+" 次")
+        +row("JSON 错误",metricsJson+" 次")
+        +row("上下文 token",metricsTokens+"（最近一幕 "+((metrics[0]?.contextTokens)||0)+"）")
+        +row("最近重试原因",retryReasonLine)
+        +(saveSizeLabel ? row("存档体积",saveSizeLabel+"（保存时自动去重压缩）") : "")
+        +row("最近一幕",(metrics[0]?.advanceChars||0)+" 字推进 · "+(metrics[0]?.choices||0)+" 选项 · "+(metrics[0]?.elapsedMinutes||0)+" 分钟")
+        +'<div class="qd">'+metrics.map(item=>"第"+item.turn+"幕 · "+Math.round((Number(item.ms)||0)/1000)+"s · 尝试"+(item.attempts||1)+" · "+(item.contextTokens||0)+" token · 推进"+(item.advanceChars||0)+"字 · "+(paceLabel[item.pace]||item.pace||"")+(item.error?" · 失败":"")).join("<br>")+'</div>'
+      ) : "";
+      body.innerHTML = goalCardHtml(S) + chapterCard + questCard + loopCards + timelineCard
+        + (chapterHistory ? card("篇章回顾",chapterHistory) : "") + closedCards + npcActions + metricsCard;
       body.querySelectorAll("[data-timeline]").forEach(btn=>{
         btn.onclick = ()=>{
           if(btn.dataset.timeline===S.timelineId) return;
@@ -1051,11 +1763,13 @@ function refreshSide(){
     }else{
       const itemCards = S.items.length
         ? card("物品与线索",'<div class="item-list">'+S.items.map((it,i)=>{
-            const meta=[(it.qty>1?("×"+it.qty):""),(Number.isFinite(it.value)&&it.value>0?("约 "+it.value+" "+curName(S)):""),(it.effect?"可用":"")].filter(Boolean).join(" · ");
+            const meta=[(it.qty>1?("×"+it.qty):""),(Number.isFinite(it.value)&&it.value>0?("约 "+it.value+" "+curName(S)):""),(it.effect?itemEffectText(it.effect):"")].filter(Boolean).join(" · ");
             return '<div class="item-row"><span class="iname">'+escapeHtml(it.name)+'</span>'
               + (it.desc?'<span class="idesc">'+escapeHtml(it.desc)+'</span>':'')
               + (meta?'<span class="imeta">'+escapeHtml(meta)+'</span>':'')
-              + (it.effect?'<button type="button" class="item-use" data-use="'+i+'">使用</button>':'')+'</div>';
+              + '<span class="item-acts"><button type="button" class="item-use item-look" data-look="'+i+'">查看</button>'
+              + (it.effect?'<button type="button" class="item-use" data-use="'+i+'">使用</button>':'')
+              + '<button type="button" class="item-use" data-show="'+i+'">出示</button></span></div>';
           }).join("")+'</div>') : "";
       const abilityCards = S.abilities.length
         ? card("习得能力",'<div class="qd">'+S.abilities.map(a=>escapeHtml(a.name)).join("、")+'</div>') : "";
@@ -1109,6 +1823,12 @@ function refreshSide(){
     body.querySelectorAll("[data-talk]").forEach(btn=>{
       btn.onclick = ()=>{ S.talkTarget = btn.dataset.talk; refreshSide(); renderTalkTarget(); };
     });
+    body.querySelectorAll("[data-look]").forEach(btn=>{
+      btn.onclick = ()=> lookItem(Number(btn.dataset.look));
+    });
+    body.querySelectorAll("[data-show]").forEach(btn=>{
+      btn.onclick = ()=> showItem(Number(btn.dataset.show));
+    });
     body.querySelectorAll("[data-use]").forEach(btn=>{
       btn.onclick = ()=> useItem(Number(btn.dataset.use));
     });
@@ -1137,7 +1857,7 @@ function refreshSide(){
   if(tab==="char"){
     const who = NPC_VIEW[S.node] || "lyra";
     const c = CHARS[who] || CHARS.lyra;
-    const aff = clamp(S.aff[c.id]||0, 0, 100);
+    const aff = clamp(S.aff[c.id]||0, -100, 100);
     const career = CAREERS[S.career];
     const selfCard = career ? `
       <div class="char" style="margin-bottom:12px">
@@ -1153,8 +1873,8 @@ function refreshSide(){
         <div class="role">${c.role}</div>
         <div class="aff">
           <span class="label">好感</span>
-          <div class="aff-bar"><div class="aff-fill" style="width:${aff}%"></div></div>
-          <span class="label">${aff}</span>
+          <div class="aff-bar"><div class="aff-fill${aff<0?" neg":""}" style="width:${Math.abs(aff)}%"></div></div>
+          <span class="label">${aff>0?"+"+aff:aff}</span>
         </div>
         <div class="desc">${c.desc}</div>
       </div>`;
@@ -1358,16 +2078,16 @@ function say(who,text){return {t:"say",who,text};}
 function narr(text){return {t:"narr",text};}
 
 /* 应用职业：设置属性加成、技能、身份 */
-function applyCareer(careerId){
+function applyCareer(careerId,state=S){
   const c = CAREERS[careerId];
   if(!c) return;
-  S.career = careerId;
+  state.career = careerId;
   const attrs = startingAttrsForCareer(careerId);
-  for(const key of START_ATTR_KEYS) S[key] = attrs[key];
-  S.hpMax = clamp(Math.round(80 + (S.physique||50)*0.4), 40, 140);
-  S.hp = S.hpMax;
-  S.skills = {...(c.skills||{})};
-  S.social = [];
+  for(const key of START_ATTR_KEYS) state[key] = attrs[key];
+  state.hpMax = clamp(Math.round(80 + (state.physique||50)*0.4), 40, 140);
+  state.hp = state.hpMax;
+  state.skills = {...(c.skills||{})};
+  state.social = [];
 }
 
 const NODES = {

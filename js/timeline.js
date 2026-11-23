@@ -1,6 +1,7 @@
 "use strict";
 /* ==================== 时间线快照与分支 ==================== */
 const TIMELINE_SNAP_PREFIX = "tavern_timeline_snap_v1:";
+const TIMELINE_SNAP_LIMIT = 12;
 const TIMELINE_COLORS = ["#d4a24c","#6fa85c","#c97b5a","#7f9fc9","#b27ac9","#c9a85c","#5aa8a1"];
 let timelineCompareId = "";
 
@@ -59,6 +60,46 @@ function timelineSnapshotStats(state){
 }
 function timelineSnapshotKey(state,tid){
   return TIMELINE_SNAP_PREFIX + timelineWorldKey(state) + ":" + String(tid||"main");
+}
+/* 快照键 → 时间线 id（键格式：前缀 + 世界键 + ":" + 时间线 id） */
+function timelineIdFromSnapshotKey(state,key){
+  const prefix = TIMELINE_SNAP_PREFIX + timelineWorldKey(state) + ":";
+  return key && key.startsWith(prefix) ? key.slice(prefix.length) : "";
+}
+function timelineSnapshotKeys(state){
+  const prefix = TIMELINE_SNAP_PREFIX + timelineWorldKey(state) + ":";
+  const keys = [];
+  try{
+    for(let i=0;i<localStorage.length;i++){
+      const key = localStorage.key(i);
+      if(key && key.startsWith(prefix)) keys.push(key);
+    }
+  }catch(e){}
+  return keys;
+}
+/* 按「最不常用」清理：先删非当前时间线、且最久没被切换的快照，保留当前主线 */
+function pruneTimelineSnapshots(state,keep){
+  const keys = timelineSnapshotKeys(state);
+  if(keys.length<=TIMELINE_SNAP_LIMIT) return 0;
+  const current = timelineSnapshotKey(state,state.timelineId||"main");
+  const metas = new Map((state.timelines||[]).map(t=>[t.id,t]));
+  const ranked = keys.filter(key=>key!==current).map(key=>{
+    const tid = timelineIdFromSnapshotKey(state,key);
+    const meta = metas.get(tid);
+    const used = Number(meta?.lastUsedAt) || Number(meta?.createdAt) || 0;
+    return {key,tid,used,main:tid==="main"};
+  }).sort((a,b)=>{
+    if(a.main!==b.main) return a.main ? 1 : -1; // 主线快照最后才删
+    return a.used-b.used;
+  });
+  let removed = 0;
+  while(keys.length-removed>TIMELINE_SNAP_LIMIT && ranked.length){
+    const victim = ranked.shift();
+    try{ localStorage.removeItem(victim.key); removed++; }catch(e){ break; }
+    const meta = metas.get(victim.tid);
+    if(meta && victim.tid!==(state.timelineId||"main") && !(keep||[]).includes(victim.tid)) meta.snapshotDropped = true;
+  }
+  return removed;
 }
 function cloneTimelineState(state){
   const copy = {};
@@ -129,7 +170,16 @@ function deleteTimelineBranch(state,id){
 function saveTimelineSnapshot(state){
   try{
     ensureTimelineState(state);
-    localStorage.setItem(timelineSnapshotKey(state,state.timelineId),JSON.stringify(cloneTimelineState(state)));
+    const key = timelineSnapshotKey(state,state.timelineId);
+    const payload = JSON.stringify(cloneTimelineState(state));
+    try{
+      localStorage.setItem(key,payload);
+    }catch(e){
+      // 配额不足：先清旧快照，再重试一次，避免回退因存档膨胀而失效
+      pruneTimelineSnapshots(state);
+      localStorage.setItem(key,payload);
+    }
+    pruneTimelineSnapshots(state);
     return true;
   }catch(e){ return false; }
 }
@@ -176,6 +226,8 @@ function switchTimelineState(state,targetId){
   saveTimelineSnapshot(state);
   const snap = loadTimelineSnapshot(state,targetId);
   if(!snap) return null;
+  const target = state.timelines.find(t=>t.id===targetId);
+  if(target) target.lastUsedAt = Date.now();
   snap.world = state.world;
   snap.timelines = state.timelines;
   snap.timelineId = targetId;

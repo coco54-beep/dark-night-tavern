@@ -157,16 +157,100 @@ const IMAGE_CFG_KEY = "tavern_image_v1";
 const IMG_NEG = "cartoon, anime, illustration, painting, 3d render, cgi, plastic skin, airbrushed, deformed, bad anatomy, extra fingers, text, watermark, logo, low quality, blurry";
 const SPECIES_EN = {"狗":"dog","犬":"dog","猫":"cat","狐狸":"fox","狐":"fox","狼":"wolf","乌鸦":"crow","蛇":"snake","马":"horse","虎":"tiger","外星人":"alien","机械":"robot","机器人":"robot","灵体":"spirit","兽人":"beastman","龙":"dragon","魔":"demon","人类":"person","人":"person"};
 function imageCfg(){
-  const native = typeof Capacitor!=="undefined" && Capacitor.isNativePlatform && Capacitor.isNativePlatform();
-  const def = {enabled:false, base: native ? "http://onlyforcoco.myqnapcloud.com:8189" : "http://127.0.0.1:8189",
-    user:"", pass:"", checkpoint:"RealVisXL_V5.0_Lightning_fp16.safetensors",
-    style:"photorealistic, cinematic soft light, natural skin texture, high detail, dark background",
-    autoAvatars:false, autoScenes:false};
-  try{ return {...def, ...JSON.parse(localStorage.getItem(IMAGE_CFG_KEY)||"{}")}; }catch(e){ return def; }
+  const def = {enabled:false,
+    address:"http://127.0.0.1:8189/qwen",
+    model:QwenWorkflow.defaults.unet, user:"", pass:"",
+    steps:20, lora:false, llmPrompt:false,
+    style:"photorealistic, cinematic soft light, natural skin texture, high detail, dark background"};
+  try{
+    const stored = JSON.parse(localStorage.getItem(IMAGE_CFG_KEY)||"{}") || {};
+    if(typeof stored.base==="string" && stored.base && !Object.hasOwn(stored,"address")) def.address = stored.base;
+    for(const key of Object.keys(def)){
+      if(typeof stored[key]===typeof def[key]) def[key] = stored[key];
+    }
+  }catch(e){ return def; }
+  return def;
 }
 function saveImageCfg(cfg){ try{ localStorage.setItem(IMAGE_CFG_KEY, JSON.stringify(cfg)); }catch(e){} }
-function imageAuth(cfg){ return cfg.user ? "Basic " + btoa(cfg.user+":"+cfg.pass) : ""; }
-function imageBase(cfg){ return String(cfg.base||"").replace(/\/+$/,""); }
+function qwenEndpoint(cfg){
+  let url;
+  try{ url = new URL(cfg.address.trim()); }catch(e){}
+  if(!url || !/^https?:$/.test(url.protocol) || url.username || url.password || url.search || url.hash){
+    throw new Error("请输入有效的 ComfyUI 地址");
+  }
+  if(url.port==="8189" && url.pathname==="/" &&
+    ["127.0.0.1","localhost"].includes(url.hostname)){
+    url.pathname = "/qwen";
+  }
+  return url.href.replace(/\/+$/,"");
+}
+function qwenHeaders(cfg){
+  if(!cfg.user) return {};
+  const bytes = new TextEncoder().encode(cfg.user+":"+cfg.pass);
+  return {Authorization:"Basic "+btoa(String.fromCharCode(...bytes))};
+}
+async function qwenFetch(url, options = {}){
+  // /prompt 和 /object_info 应快速返回；/history 与 /view 在 ComfyUI 采样期间可能被拖慢，需要更长等待。
+  const isPoll = /\/history\//.test(url) || /\/view\?/.test(url);
+  const timeout = AbortSignal.timeout(isPoll ? 90000 : 20000);
+  const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
+  try{ return await fetch(url,{...options,signal,redirect:"error"}); }
+  catch(error){
+    if(error instanceof TypeError) throw new Error("无法连接 ComfyUI，请检查地址和网络");
+    if(error?.name==="TimeoutError" && isPoll) throw new Error("ComfyUI 响应超时，任务可能仍在生成");
+    throw error;
+  }
+}
+async function qwenResponse(response){
+  if(!response.ok){
+    if(response.status===401 || response.status===403) throw new Error("ComfyUI 拒绝访问，请检查账号和密码");
+    const body = await response.json().catch(()=>null);
+    const nodeError = Object.values(body?.node_errors || {})[0]?.errors?.[0];
+    throw new Error(nodeError?.details || body?.error?.message || "ComfyUI 请求失败（"+response.status+"）");
+  }
+  return response;
+}
+async function qwenGenerate(cfg,prompt,negative,kind,seed,signal,onSubmitted){
+  const base = qwenEndpoint(cfg);
+  const headers = qwenHeaders(cfg);
+  const models = {...QwenWorkflow.defaults,unet:cfg.model,steps:Number(cfg.steps)||QwenWorkflow.defaults.steps,useLora:cfg.lora===true};
+  const submitted = await qwenResponse(await qwenFetch(base+"/prompt",{
+    method:"POST", headers:{...headers,"Content-Type":"application/json"},
+    body:JSON.stringify({prompt:QwenWorkflow.create(prompt,negative,kind,seed,models)}),signal
+  }));
+  const {prompt_id:id} = await submitted.json();
+  if(typeof id!=="string" || !id) throw new Error("ComfyUI 没有返回任务编号");
+  if(typeof onSubmitted==="function"){ try{ onSubmitted(id); }catch(e){} }
+  const deadline = Date.now() + 10 * 60 * 1000;
+  let pollFailures = 0;
+  while(Date.now() < deadline){
+    await new Promise(resolve=>setTimeout(resolve,2000));
+    let response;
+    try{
+      response = await qwenResponse(await qwenFetch(base+"/history/"+encodeURIComponent(id),{headers,signal}));
+    }catch(error){
+      if(signal?.aborted) throw error;
+      const message = String(error?.message||"");
+      if(/拒绝访问|未生成图片|生成失败/.test(message)) throw error;
+      if(++pollFailures >= 5) throw new Error("ComfyUI 仍在生成，请稍后重试");
+      continue;
+    }
+    pollFailures = 0;
+    const entry = (await response.json())[id];
+    if(!entry) continue;
+    const image = entry.outputs?.["8"]?.images?.[0];
+    if(!image){
+      const failure = entry.status?.messages?.find(note=>note[0]==="execution_error")?.[1];
+      const reason = String(failure?.exception_message || "").trim().split(/\r?\n/,1)[0].slice(0,180);
+      throw new Error(reason || "ComfyUI 未生成图片");
+    }
+    const query = new URLSearchParams({filename:image.filename,subfolder:image.subfolder||"",type:image.type||"output"});
+    const result = await qwenResponse(await qwenFetch(base+"/view?"+query,{headers,signal}));
+    if(!result.headers.get("Content-Type")?.startsWith("image/")) throw new Error("ComfyUI 未返回图片");
+    return blobToDataURL(await result.blob());
+  }
+  throw new Error("等待 Qwen 生成超时");
+}
 let imageDbPromise = null;
 function imageDb(){
   if(imageDbPromise) return imageDbPromise;
@@ -176,34 +260,41 @@ function imageDb(){
     req.onsuccess = ()=>res(req.result);
     req.onerror = ()=>rej(req.error);
   });
+  imageDbPromise.catch(()=>{ imageDbPromise = null; });
   return imageDbPromise;
 }
 async function imagePut(key,val){
   const db = await imageDb();
-  return new Promise((res,rej)=>{ const tx=db.transaction("images","readwrite"); tx.objectStore("images").put(val,key); tx.oncomplete=()=>res(true); tx.onerror=()=>rej(tx.error); });
+  return tavernDbStore(db,"images","readwrite",store=>{ store.put(val,key); });
 }
 async function imageGet(key){
-  const db = await imageDb();
-  return new Promise((res,rej)=>{ const tx=db.transaction("images","readonly"); const rq=tx.objectStore("images").get(key); rq.onsuccess=()=>res(rq.result||""); rq.onerror=()=>rej(rq.error); });
-}
-async function imageListKeys(){
-  const db = await imageDb();
-  return new Promise((res,rej)=>{ const tx=db.transaction("images","readonly"); const rq=tx.objectStore("images").getAllKeys(); rq.onsuccess=()=>res(rq.result||[]); rq.onerror=()=>rej(rq.error); });
-}
-async function imageDel(key){
-  const db = await imageDb();
-  return new Promise((res,rej)=>{ const tx=db.transaction("images","readwrite"); tx.objectStore("images").delete(key); tx.oncomplete=()=>res(true); tx.onerror=()=>rej(tx.error); });
-}
-async function pruneSceneImages(max=12){
-  if(!S || !S.log) return;
-  const prefix = "scene:" + (S.worldId||"local") + ":";
-  const entries = S.log.filter(e=>e && e.t==="image" && typeof e.key==="string" && e.key.startsWith(prefix));
-  const keep = new Set(entries.slice(-max).map(e=>e.key));
-  S.log = S.log.filter(e=>!(e && e.t==="image" && typeof e.key==="string" && e.key.startsWith(prefix)) || keep.has(e.key));
+  const legacy = S?.imageData?.[key] || "";
   try{
-    const keys = await imageListKeys();
-    await Promise.all(keys.filter(k=>typeof k==="string" && k.startsWith(prefix) && !keep.has(k)).map(imageDel));
-  }catch(e){}
+    const db = await imageDb();
+    const data = await tavernDbStore(db,"images","readonly",store=>new Promise((resolve,reject)=>{
+      const req = store.get(key);
+      req.onsuccess = ()=>resolve(req.result);
+      req.onerror = ()=>reject(req.error);
+    }));
+    return data || legacy;
+  }catch(error){
+    if(legacy) return legacy;
+    throw error;
+  }
+}
+async function migrateLegacyImages(state){
+  const images = state.imageData;
+  if(!images) return;
+  try{
+    const db = await imageDb();
+    await tavernDbStore(db,"images","readwrite",store=>{
+      for(const [key,value] of Object.entries(images)){
+        const req = store.getKey(key);
+        req.onsuccess = ()=>{ if(req.result===undefined) store.put(value,key); };
+      }
+    });
+    if(state.imageData===images) delete state.imageData;
+  }catch(error){ /* Keep embedded copies until the migration has committed. */ }
 }
 function blobToDataURL(blob){
   return new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result); r.onerror=()=>rej(r.error); r.readAsDataURL(blob); });
@@ -212,53 +303,6 @@ function seedOf(s){
   let h=0; const str=String(s||"");
   for(let i=0;i<str.length;i++) h=(h*31+str.charCodeAt(i))|0;
   return Math.abs(h)%1000000;
-}
-function comfyWorkflow(cfg,positive,negative,w,h,seed){
-  return {
-    "1": {"class_type":"CheckpointLoaderSimple","inputs":{"ckpt_name":cfg.checkpoint}},
-    "2": {"class_type":"CLIPTextEncode","inputs":{"text":positive,"clip":["1",1]}},
-    "3": {"class_type":"CLIPTextEncode","inputs":{"text":negative,"clip":["1",1]}},
-    "4": {"class_type":"EmptyLatentImage","inputs":{"width":w,"height":h,"batch_size":1}},
-    "5": {"class_type":"KSampler","inputs":{"seed":seed,"steps":6,"cfg":2.0,"sampler_name":"dpmpp_sde","scheduler":"karras","denoise":1.0,"model":["1",0],"positive":["2",0],"negative":["3",0],"latent_image":["4",0]}},
-    "6": {"class_type":"VAEDecode","inputs":{"samples":["5",0],"vae":["1",2]}},
-    "7": {"class_type":"SaveImage","inputs":{"filename_prefix":"avatar","images":["6",0]}}
-  };
-}
-async function comfyGenerate(prompt,{w=832,h=1216,negative=IMG_NEG,seed=1,signal=null}={}){
-  const cfg = imageCfg();
-  if(!cfg.enabled) throw new Error("图像生成未启用，请先在「图像设置」里开启");
-  const base = imageBase(cfg);
-  if(!base) throw new Error("没有填写 ComfyUI 地址");
-  const aborted = ()=>{ const e=new Error("已取消生成"); e.name="AbortError"; return e; };
-  if(signal && signal.aborted) throw aborted();
-  const headers = {"Content-Type":"application/json"};
-  const auth = imageAuth(cfg); if(auth) headers.Authorization = auth;
-  const cid = (typeof crypto!=="undefined" && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now())+Math.random();
-  const r = await fetch(base+"/prompt",{method:"POST",headers,body:JSON.stringify({prompt:comfyWorkflow(cfg,prompt,negative,w,h,seed),client_id:cid}),signal});
-  if(r.status===401 || r.status===403) throw new Error("ComfyUI 需要登录，请在「图像设置」填写正确的用户名和密码");
-  if(!r.ok) throw new Error("ComfyUI 提交失败（"+r.status+"）");
-  const {prompt_id} = await r.json();
-  let img = null;
-  const t0 = Date.now();
-  while(Date.now()-t0 < 150000){
-    await new Promise(res=>setTimeout(res,1500));
-    if(signal && signal.aborted) throw aborted();
-    const hr = await fetch(base+"/history/"+prompt_id,{headers,signal});
-    if(!hr.ok) continue;
-    const hist = await hr.json();
-    const entry = hist[prompt_id];
-    if(entry && entry.outputs){
-      for(const node of Object.values(entry.outputs)){
-        if(node && Array.isArray(node.images) && node.images.length){ img = node.images[0]; break; }
-      }
-    }
-    if(img) break;
-  }
-  if(!img) throw new Error("ComfyUI 生成超时");
-  const q = new URLSearchParams({filename:img.filename,subfolder:img.subfolder||"",type:img.type||"output"});
-  const ir = await fetch(base+"/view?"+q.toString(),{headers,signal});
-  if(!ir.ok) throw new Error("读取生成图失败（"+ir.status+"）");
-  return await blobToDataURL(await ir.blob());
 }
 function characterLook(c){
   return ([
@@ -287,17 +331,45 @@ function sceneMoment(){
     .filter(entry=>entry && ["narr","say","speech","action","npc-action"].includes(entry.t))
     .map(entry=>entry.who ? (entry.who+"："+entry.text) : String(entry.text||""))
     .join(" / ").slice(-1200);
+  const lastAction = [...(S.log||[])].reverse()
+    .find(entry=>entry && (entry.t==="action" || entry.t==="speech"));
   const present = (S.present||[]).slice(0,5).map(name=>{
     const c = (S.cast||[]).find(x=>x && x.name===name);
     return c ? [c.name,c.species,c.gender,c.age,c.height ? c.height+"cm" : "",c.weight ? c.weight+"kg" : "",c.origin,c.identity,c.job,c.appearance,c.outfit].filter(Boolean).join("，") : name;
   });
+  const bonds = (S.present||[]).slice(0,5).map(name=>{
+    const c = (S.cast||[]).find(x=>x && x.name===name);
+    if(!c) return null;
+    const aff = Number(S.aff?.[c.name]);
+    const intimacy = Number(S.intimacy?.[c.name]);
+    const desire = Number(c.desire);
+    return {
+      name:c.name,
+      role:[c.identity,c.job].filter(Boolean).join(" "),
+      attitude:c.attitude||"",
+      tie:c.tie||"",
+      affinity:Number.isFinite(aff) ? Math.round(aff) : undefined,
+      intimacy:Number.isFinite(intimacy) ? Math.round(intimacy) : undefined,
+      desire:Number.isFinite(desire) ? Math.round(desire) : undefined
+    };
+  }).filter(Boolean);
   return {
     scene:S.scene||"",
     moment:recent,
+    action:String(lastAction?.text||"").replace(/^你选择了：/,"").trim(),
+    player:playerImageSpec(),
     plot:{goal:S.plot?.goal||"",conflict:S.plot?.conflict||"",next:S.plot?.next||""},
     place:e.place||"", time:formatClock(S), weather:e.weather||"",
-    era:e.era||"", conditions:e.conditions||"", present
+    era:e.era||"", conditions:e.conditions||"", present, bonds
   };
+}
+function playerImageSubject(){
+  const gender = /女/.test(S.gender||"") ? "woman" : /男/.test(S.gender||"") ? "man" : "person";
+  const age = Number.isFinite(Number(S.age)) ? Number(S.age)+" years old" : "";
+  const identity = S.playerIdentity?.identity || S.career || "";
+  const appearance = S.appearance || "";
+  const outfit = S.outfit || "";
+  return [age, gender, "protagonist", identity, appearance, outfit].filter(Boolean).join(", ");
 }
 function sceneImagePrompt(){
   const m = sceneMoment();
@@ -374,9 +446,47 @@ function finalizeScenePrompt(prompt){
   ].filter(Boolean).join(". ");
   return (lead+anchors+". "+(clean||"")).replace(/\s+/g," ").slice(0,1600);
 }
+function sceneActionEn(text){
+  const t = String(text||"");
+  if(!t) return "";
+  const rules = [
+    [/拔刀|拔剑|出刀|亮刀|横刀|架刀/, "drawing a blade and facing an opponent"],
+    [/劈|砍|刺|攻击|动手|交手|格斗|打斗/, "attacking in a tense fight"],
+    [/推开|推门|开门|进门|闯入/, "pushing open a door and entering"],
+    [/坐下|坐着|落座|坐/, "sitting down and talking"],
+    [/站|拦|挡|守/, "standing in the way, alert"],
+    [/抱住|搂住|拥抱|靠在/, "holding someone close"],
+    [/亲吻|吻|贴近|耳语/, "leaning in close and speaking softly"],
+    [/递|交给|拿出|掏出|举起/, "handing something over"],
+    [/检查|查看|观察|打量|翻看|搜查/, "examining the scene closely"],
+    [/跑|追|赶|逃/, "moving quickly through the scene"],
+    [/喝酒|端起|举杯|喝茶|吃饭/, "holding a cup or bowl at the table"],
+    [/跪下|跪|低头|鞠躬/, "kneeling or bowing"],
+    [/哭|落泪|流泪/, "showing visible emotion"],
+    [/笑|微笑|冷笑/, "with a visible expression on the face"],
+    [/走|离开|出门/, "walking through the scene"],
+    [/说|问|答|坦白|告诉/, "talking face to face"],
+    [/约|见面|等/, "meeting someone face to face"]
+  ];
+  const hit = rules.find(([re])=>re.test(t));
+  return hit ? hit[1] : "performing a decisive action";
+}
 function shortScenePrompt(){
   const m = sceneMoment();
   const culture = sceneCulture();
+  const player = playerImageSubject();
+  const actionText = sceneActionEn(m.action);
+  const action = actionText ? "protagonist is actively doing this: "+actionText : "";
+  const recentActions = (S.log||[]).slice(-16)
+    .filter(e=>e && (e.t==="npc-action" || e.t==="narr"))
+    .map(e=>{
+      const text = String(e.text||"").replace(/[“”"「」『』][^“”"「」『』]{0,240}[“”"「」『』]/g,"").replace(/\s+/g," ").trim();
+      return text ? ((e.who ? e.who+"：" : "")+text) : "";
+    })
+    .filter(Boolean)
+    .join("；")
+    .slice(-700);
+  const actionsClause = recentActions ? "visible character actions and interactions: "+recentActions : "";
   const people = (S.present||[]).slice(0,5).map(name=>{
     const c = (S.cast||[]).find(x=>x && x.name===name);
     if(!c) return name;
@@ -386,14 +496,15 @@ function shortScenePrompt(){
     const isPorter = /脚夫|搬|苦力/.test(roleText);
     const role = isOwner ? "shop owner" : isPorter ? "porter"
       : /伙计|小二|跑堂/.test(roleText) ? "shop assistant" : /守卫|兵|捕快|差役/.test(roleText) ? "guard" : "local resident";
-    const outfit = isPorter ? "short hemp tunic and straw sandals"
+    const outfit = c.outfit || (isPorter ? "short hemp tunic and straw sandals"
       : isOwner ? "dark blue cotton long robe"
-      : "period Chinese clothing";
+      : "period Chinese clothing");
+    const appearance = c.appearance || "";
     const pose = isOwner ? "behind the wooden counter" : isPorter ? "standing near the doorway" : "standing nearby";
     const age = Number(c.age)>=40 ? "middle-aged" : Number(c.age)<=24 ? "young" : "";
-    return [age, culture==="ancient Chinese"?"Chinese":"", gender, role, "in", outfit, pose].filter(Boolean).join(" ");
+    return [age, culture==="ancient Chinese"?"Chinese":"", gender, role, appearance, "wearing", outfit, pose].filter(Boolean).join(" ");
   });
-  const count = people.length;
+  const count = people.length + 1;
   const time = sceneTimeOfDay();
   const weather = sceneWeatherEn();
   const rawPlace = String(m.place||"");
@@ -413,21 +524,21 @@ function shortScenePrompt(){
   }
   if(!place) place = "the scene";
   const atmosphere = isShop ? "red lanterns, warm lantern light, wet stone street" : "period-accurate environment, natural light";
-  if(!count){
-    return ["empty", place, "at", time, weather, atmosphere, "cinematic wide shot, photorealistic, no people"].filter(Boolean).join(", ");
-  }
   const subject = count===1
-    ? people[0]+", face visible, full body"
-    : (count===2 ? "two-shot of exactly 2 people: " : "group shot of exactly "+count+" people: ")
-      + people.join(" and ")+", facing each other, faces visible in three-quarter view, all fully in frame";
-  return ["cinematic photorealistic wide shot", subject, "in", place, "at", time, weather,
-    culture+" architecture and clothing, "+atmosphere].filter(Boolean).join(", ");
+    ? "single subject, exactly 1 person visible: "+player+", face and full body visible"+(action?", "+action:"")
+    : (count===2 ? "two-shot of exactly 2 people, both fully visible: " : "group shot of exactly "+count+" people, all fully visible: ")
+      + "center foreground: "+player+(action?", "+action:"")
+      + (people.length ? "; beside the protagonist: "+people.join(" and ") : "")
+      + ", facing each other, faces visible in three-quarter view, no missing person";
+  return ["cinematic photorealistic wide shot", subject, actionsClause, "in", place, "at", time, weather,
+    culture+" architecture and clothing, "+atmosphere, "no text, no watermark"].filter(Boolean).join(", ").slice(0,1800);
 }
 function sceneNegative(){
-  let base = IMG_NEG + ", text, signage, calligraphy, banners, labels, watermark, logo, extra people, missing character, duplicate face, empty establishing shot, empty room, landscape only, close-up portrait";
-  if((S.present||[]).length>1) base += ", solo, single person, one person only, back to camera, facing away, rear view";
+  let base = IMG_NEG + ", text, signage, calligraphy, banners, labels, watermark, logo, missing character, duplicate face, empty establishing shot, empty room, landscape only, close-up portrait";
+  if((S.present||[]).length + 1 > 1) base += ", solo, single person, one person only, back to camera, facing away, rear view";
   if(sceneCulture()==="ancient Chinese"){
     base += ", japanese architecture, kimono, shrine, torii, tatami, japanese lanterns, japanese characters, samurai, ukiyo-e, modern buildings, power lines, electric wires, concrete city, cars, neon signs";
+    base += ", extra swordsman, off-screen attacker as a person";
   }
   return base;
 }
@@ -439,24 +550,30 @@ function npcNegative(c){
   return base;
 }
 async function visualPrompt(c, kind){
-  try{
-    const sys = "You write one concise English prompt for a photorealistic SDXL image generator. Output only the prompt, no quotes, no markdown. Preserve exact identity: species, gender, age, hair, eyes, skin/fur/metal, body type, scars, prosthetics and clothing. Non-human characters must look clearly non-human. Never substitute a generic face or outfit. No text, watermark, logo, or UI.";
-    let user;
-    if(kind === "npc"){
-      const p = {name:c.name,species:c.species,gender:c.gender,age:c.age,height:c.height,weight:c.weight,origin:c.origin,identity:c.identity,appearance:c.appearance,outfit:c.outfit,job:c.job,personality:c.personality,tie:c.tie,attitude:c.attitude,background:String(c.background||"").slice(0,240)};
-      const setting = {world:S.worldName||S.genre||"",era:S.environment&&S.environment.era||"",place:S.environment&&S.environment.place||""};
-      user = "Character reference: " + JSON.stringify(p) + ". Setting: " + JSON.stringify(setting) + ". Write a photorealistic " + (/human|人类|人/i.test(c.species||"") ? "headshot" : "creature portrait") + " prompt. You must repeat every explicit origin, appearance and outfit detail; use origin/regional heritage to guide facial features and styling without caricature or stereotype. Do not change hair color, eye color, age, species, body type or clothing. One person only, centered, dark background, 85mm, natural skin/fur/metal texture.";
-    }else{
-      const m = sceneMoment();
-      user = "Story moment: " + JSON.stringify(m)
-        + ". Illustrate this exact narrative beat as a cinematic wide shot. Depict what is happening now, including the visible characters, their action, expressions and spatial relationship; keep the location, time, weather and era. Every present character must match the listed species, age, hair, eyes, body and outfit exactly. Do not make a generic empty establishing shot, do not replace characters with generic faces, and do not invent a different event. No text, watermark, logo or UI.";
-    }
-    const sig = (typeof AbortSignal!=="undefined" && AbortSignal.timeout) ? AbortSignal.timeout(30000) : null;
-    const txt = await callLLM([{role:"system",content:sys},{role:"user",content:user}], sig, null, {temperature:0.35});
-    const clean = String(txt||"").trim().replace(/^```[\s\S]*?```$/g,"").replace(/^[\"'`]+|[\"'`]+$/g,"").slice(0,800);
-    if(clean) return clean;
-  }catch(e){}
-  return kind==="npc" ? npcImagePrompt(c) : sceneImagePrompt();
+  const cfg = imageCfg();
+  if(cfg.llmPrompt){
+    try{
+      const sys = "You write one concise English prompt for photorealistic image generation. Output only the prompt, no quotes, no markdown. Preserve exact identity: species, gender, age, hair, eyes, skin/fur/metal, body type, scars, prosthetics and clothing. Non-human characters must look clearly non-human. Never substitute a generic face or outfit. Depict the current relationship between the protagonist and each present NPC through body language, distance, gaze and natural touch. No text, watermark, logo, or UI.";
+      let user;
+      if(kind === "npc"){
+        const p = {name:c.name,species:c.species,gender:c.gender,age:c.age,height:c.height,weight:c.weight,origin:c.origin,identity:c.identity,appearance:c.appearance,outfit:c.outfit,job:c.job,personality:c.personality,tie:c.tie,attitude:c.attitude,background:String(c.background||"").slice(0,240)};
+        const setting = {world:S.worldName||S.genre||"",era:S.environment&&S.environment.era||"",place:S.environment&&S.environment.place||""};
+        user = "Character reference: " + JSON.stringify(p) + ". Setting: " + JSON.stringify(setting) + ". Write a photorealistic " + (/human|人类|人/i.test(c.species||"") ? "headshot" : "creature portrait") + " prompt. You must repeat every explicit origin, appearance and outfit detail; use origin/regional heritage to guide facial features and styling without caricature or stereotype. Do not change hair color, eye color, age, species, body type or clothing. One person only, centered, dark background, 85mm, natural skin/fur/metal texture.";
+      }else{
+        const m = sceneMoment();
+        user = "Story moment: " + JSON.stringify(m)
+          + ". Write one concise English image prompt for this exact beat. Start with the protagonist's visible action and pose, then place the protagonist and every present NPC in the location with clear left/right/spatial relationships. Use the present/bonds fields to show each NPC's real relationship to the protagonist: lovers or close friends stand near, face each other and touch naturally; hostile or wary characters keep physical distance, guarded posture and cold gaze; superiors keep a formal distance. The protagonist must be in frame, doing the listed action, with the listed appearance and outfit. Only render the protagonist and the listed present characters; never turn an off-screen attacker mentioned in the action into a full extra person—at most show a blade or shadow at the frame edge. The NPCs must keep their listed role and posture, not become extra swordsmen. Depict expressions and interaction; keep location, time, weather and era. Do not make a generic empty establishing shot, do not omit the protagonist, do not replace characters with generic faces, and do not invent a different event. No text, watermark, logo or UI.";
+      }
+      const sig = (typeof AbortSignal!=="undefined" && AbortSignal.timeout) ? AbortSignal.timeout(30000) : null;
+      const txt = await callLLM([{role:"system",content:sys},{role:"user",content:user}], sig, null, {temperature:0.35,maxTokens:450});
+      const clean = String(txt||"").trim().replace(/^```[\s\S]*?```$/g,"").replace(/^[\"'`]+|[\"'`]+$/g,"").slice(0,800);
+      if(clean) return [clean,cfg.style].filter(Boolean).join(", ");
+    }catch(e){}
+  }
+  if(kind !== "npc"){
+    return [shortScenePrompt(), "absolutely no text, no letters, no Chinese characters, no calligraphy, no signs, no banners, no watermark, no UI", cfg.style].filter(Boolean).join(", ");
+  }
+  return npcImagePrompt(c);
 }
 function playerImageSpec(){
   const pi = S.playerIdentity || {};
@@ -482,10 +599,13 @@ async function generatePlayerAvatar(){
   const cfg = imageCfg();
   if(!cfg.enabled) throw new Error("请先在「图像设置」里启用图像生成");
   const spec = playerImageSpec();
-  const key = "avatar:"+(S.worldId||"local")+":__player__";
+  const scope = {worldId:S.worldId,timelineId:S.timelineId};
+  const key = "avatar:"+(S.worldId||"local")+":"+(S.timelineId||"main")+":__player__";
   const prompt = await visualPrompt(spec,"npc");
-  const data = await comfyGenerate(prompt,{w:832,h:1216,negative:npcNegative(spec),seed:seedOf(spec.name+"__player__")});
+  const data = await qwenGenerate(cfg,prompt,npcNegative(spec),"avatar",seedOf(spec.name+"__player__"));
   await imagePut(key,data);
+  while(activeTurn?.committing) await activeTurn.commitPromise;
+  if(!currentImageStory(scope)) throw new Error("已切换旅途或时间线");
   S.avatarKey = key;
   await saveProgress(true);
   refreshSide();
@@ -496,38 +616,118 @@ async function generateNpcAvatar(name){
   if(!cfg.enabled) throw new Error("请先在「图像设置」里启用图像生成");
   const c = (S.cast||[]).find(x=>x.name===name);
   if(!c) throw new Error("找不到这个角色");
-  const key = "avatar:"+(S.worldId||"local")+":"+name;
+  const scope = {worldId:S.worldId,timelineId:S.timelineId};
+  const key = "avatar:"+(S.worldId||"local")+":"+(S.timelineId||"main")+":"+name;
   const prompt = await visualPrompt(c,"npc");
-  const data = await comfyGenerate(prompt,{w:832,h:1216,negative:npcNegative(c),seed:seedOf(name)});
+  const data = await qwenGenerate(cfg,prompt,npcNegative(c),"avatar",seedOf(name));
   await imagePut(key,data);
-  c.avatarKey = key;
+  while(activeTurn?.committing) await activeTurn.commitPromise;
+  if(!currentImageStory(scope)) throw new Error("已切换旅途或时间线");
+  const character = (S.cast||[]).find(x=>x.name===name || x.profileAliases?.includes(name));
+  if(!character) throw new Error("当前旅途中找不到这个角色");
+  character.avatarKey = key;
   await saveProgress(true);
   refreshSide();
   return key;
+}
+const PENDING_IMAGE_KEY = "tavern_pending_image_v1";
+let sceneImageBusy = false;
+function pendingImageKey(scope){
+  return PENDING_IMAGE_KEY+":"+encodeURIComponent(scope.worldId||"local")+":"+encodeURIComponent(scope.timelineId||"main");
+}
+function currentImageStory(meta){
+  return pendingImageKey(S)===pendingImageKey(meta);
+}
+function clearPendingImage(meta){
+  try{
+    for(const key of [pendingImageKey(meta),PENDING_IMAGE_KEY]){
+      const pending = JSON.parse(localStorage.getItem(key)||"null");
+      if(pending?.key===meta.key) localStorage.removeItem(key);
+    }
+  }catch(error){}
+}
+async function attachSceneImage(meta,data){
+  if(data) await imagePut(meta.key,data);
+  while(activeTurn?.committing) await activeTurn.commitPromise;
+  if(!currentImageStory(meta)) return false;
+  if(!(S.log||[]).some(e=>e?.t==="image" && e.key===meta.key)){
+    S.sceneImageKey = meta.key;
+    const entry = {t:"image",key:meta.key,alt:"第 "+(meta.startTurn+1)+" 幕配图 · "+meta.sceneLabel};
+    S.log = [...(S.log||[]),entry].slice(-120);
+    const log = $("log");
+    const wasAtBottom = typeof logAtBottom==="function" ? logAtBottom() : true;
+    logToDOM(entry);
+    if(log && wasAtBottom) log.scrollTop = log.scrollHeight;
+  }
+  await saveProgress(true,{allowOpening:true,reportError:true});
+  clearPendingImage(meta);
+  return true;
 }
 async function generateSceneImage({signal=null}={}){
   const cfg = imageCfg();
   if(!cfg.enabled) throw new Error("请先在「图像设置」里启用图像生成");
   const aborted = ()=>{ const e=new Error("已取消生成"); e.name="AbortError"; return e; };
+  const storyId = S.worldId || "local";
+  const timelineId = S.timelineId || "main";
+  const startTurn = S.turn || 0;
+  const startSceneLabel = S.scene || (S.environment && S.environment.place) || "当前场景";
   if(signal && signal.aborted) throw aborted();
   const moment = sceneMoment();
-  const sig = seedOf(JSON.stringify({turn:S.turn,scene:S.scene,plot:S.plot,moment:moment.moment.slice(-700),place:moment.place}));
+  const sig = seedOf(JSON.stringify({turn:startTurn,scene:S.scene,plot:S.plot,moment:moment.moment.slice(-700),place:moment.place}));
   const variation = Date.now().toString(36).slice(-5)+Math.random().toString(36).slice(2,5);
-  const key = "scene:"+(S.worldId||"local")+":"+(S.turn||0)+":"+sig+":"+variation;
-  const prompt = shortScenePrompt();
+  const key = "scene:"+storyId+":"+timelineId+":"+startTurn+":"+sig+":"+variation;
+  const totalPeople = (S.present||[]).length + 1;
+  const countLead = totalPeople>1
+    ? "EXACTLY "+totalPeople+" PEOPLE IN FRAME: the protagonist and "+(totalPeople-1)+" other character(s), all fully visible, full body, no missing person. "
+    : "ONE PERSON IN FRAME: the protagonist, full body. ";
+  if(cfg.llmPrompt) imageToast("正在让 LLM 写视觉提示词……",0);
+  const prompt = countLead + await visualPrompt(S,"scene");
+  if(cfg.llmPrompt) imageToast("视觉提示词已生成，正在生成图片……",0);
   if(signal && signal.aborted) throw aborted();
-  const data = await comfyGenerate(prompt,{w:1216,h:832,negative:sceneNegative(),seed:seedOf(key),signal});
-  if(signal && signal.aborted) throw aborted();
-  await imagePut(key,data);
-  if(signal && signal.aborted) throw aborted();
-  S.sceneImageKey = key;
-  const entry = {t:"image",key,alt:"场景图 · "+(S.scene||(S.environment&&S.environment.place)||"当前场景")};
-  S.log = [...(S.log||[]),entry].slice(-120);
-  logToDOM(entry);
-  const logEl = $("log"); if(logEl) logEl.scrollTop = logEl.scrollHeight;
-  await pruneSceneImages(12);
-  await saveProgress(true);
+  const pendingMeta = {worldId:storyId,timelineId,key,startTurn,sceneLabel:startSceneLabel,createdAt:Date.now()};
+  if(!currentImageStory(pendingMeta)) throw aborted();
+  const data = await qwenGenerate(cfg,prompt,sceneNegative(),"scene",seedOf(key),signal,promptId=>{
+    try{ localStorage.setItem(pendingImageKey(pendingMeta),JSON.stringify({...pendingMeta,promptId})); }catch(error){}
+  });
+  if(signal?.aborted || !await attachSceneImage(pendingMeta,data)) throw aborted();
   return key;
+}
+async function resumePendingImage(){
+  if(sceneImageBusy) return false;
+  let pending;
+  try{
+    pending = JSON.parse(localStorage.getItem(pendingImageKey(S))||localStorage.getItem(PENDING_IMAGE_KEY)||"null");
+  }catch(error){ return false; }
+  if(!pending?.promptId) return false;
+  if(Date.now()-Number(pending.createdAt||0)>30*60*1000){ clearPendingImage(pending); return false; }
+  if(!currentImageStory(pending)) return false;
+  const cfg = imageCfg();
+  if(!cfg.enabled) return false;
+  sceneImageBusy = true;
+  try{
+    if((S.log||[]).some(e=>e?.t==="image" && e.key===pending.key)){
+      await attachSceneImage(pending);
+      return true;
+    }
+    const base = qwenEndpoint(cfg), headers = qwenHeaders(cfg);
+    const response = await qwenResponse(await qwenFetch(base+"/history/"+encodeURIComponent(pending.promptId),{headers}));
+    const entry = (await response.json())[pending.promptId];
+    if(!entry){ setTimeout(resumePendingImage,8000); return true; }
+    const image = entry.outputs?.["8"]?.images?.[0];
+    if(!image){
+      clearPendingImage(pending);
+      imageToast("后台生图失败，请重新生成",5000);
+      return true;
+    }
+    const query = new URLSearchParams({filename:image.filename,subfolder:image.subfolder||"",type:image.type||"output"});
+    const view = await qwenResponse(await qwenFetch(base+"/view?"+query,{headers}));
+    const data = await blobToDataURL(await view.blob());
+    if(await attachSceneImage(pending,data)) imageToast("后台生成的配图已补回",4000);
+    return true;
+  }catch(error){
+    setTimeout(resumePendingImage,10000);
+    return true;
+  }finally{ sceneImageBusy = false; }
 }
 let imageToastTimer = null;
 function imageToast(message,ms=3500){
@@ -539,59 +739,123 @@ function imageToast(message,ms=3500){
   if(ms>0) imageToastTimer = setTimeout(()=>{ el.hidden = true; },ms);
 }
 
-function showImageSettings(back = showTitle){
+function showImageSettings(back = showTitle, backLabel = back===showTitle ? "返回首页" : "返回设置"){
   const cfg = imageCfg();
   const card = $("card");
+  $("overlay").classList.remove("hidden");
   card.innerHTML = `
     <h1>图像设置</h1>
-    <div class="sub">用本地 ComfyUI 生成 NPC 头像和场景配图。启用后，故事中点右上角 🖼 会为当前剧情点生成一张配图并插入聊天记录；按一次生一次。手机 APK 请把地址改成电脑的局域网 IP 或公网地址，并填写代理账号密码。</div>
+    <div class="sub">直连 ComfyUI 生成 Qwen Image 2.1 头像和场景配图。剧情里点 🖼，图片会出现在聊天记录中。</div>
     <form class="auth-form" id="image-form" autocomplete="off">
       <label class="check-line"><input type="checkbox" id="image-enabled" ${cfg.enabled?"checked":""}> 启用图像生成</label>
+      <label class="check-line"><input type="checkbox" id="image-llm-prompt" ${cfg.llmPrompt?"checked":""}> 让 LLM 写视觉提示词（动作/关系最准，单张多等几秒）</label>
+      <div class="form-note">关闭时用本地模板，速度快；开启后先让 LLM 根据当前剧情写生图提示词，动作和人物关系更准，但每张图会多等几秒。</div>
       <label for="image-base">ComfyUI 地址</label>
-      <input id="image-base" type="url" maxlength="512" value="${escapeHtml(cfg.base||"")}" placeholder="http://127.0.0.1:8189" required>
+      <input id="image-base" type="url" maxlength="512" value="${escapeHtml(cfg.address)}" placeholder="http://电脑地址:8189/qwen">
+      <label for="image-model">模型名</label>
+      <input id="image-model" type="text" maxlength="250" value="${escapeHtml(cfg.model)}">
+      <label for="image-mode">生成模式</label>
+      <select id="image-mode">
+        <option value="20" ${cfg.lora?"":"selected"}>不使用 LoRA · 20 步（画质稳，较慢）</option>
+        <option value="4" ${cfg.lora?"selected":""}>使用 Lightning LoRA · 4 步（最快）</option>
+      </select>
       <label for="image-user">用户名</label>
-      <input id="image-user" type="text" maxlength="120" value="${escapeHtml(cfg.user||"")}">
+      <input id="image-user" type="text" maxlength="120" value="${escapeHtml(cfg.user)}" autocomplete="username">
       <label for="image-pass">密码</label>
-      <input id="image-pass" type="password" maxlength="512" placeholder="留空保留原密码">
-      <label for="image-checkpoint">模型文件</label>
-      <input id="image-checkpoint" type="text" maxlength="200" value="${escapeHtml(cfg.checkpoint||"")}">
-      <label for="image-style">风格前缀</label>
+      <input id="image-pass" type="password" maxlength="512" autocomplete="current-password" placeholder="${cfg.pass?"留空保留原密码":""}">
+      <label for="image-style">头像风格</label>
       <input id="image-style" type="text" maxlength="300" value="${escapeHtml(cfg.style||"")}">
       <div class="form-note" id="image-status" role="status"></div>
-      <button type="submit" class="big-btn">保存</button>
-      <button type="button" class="big-btn ghost" id="image-test">测试连接</button>
-      <button type="button" class="logout-btn" id="image-back">返回首页</button>
+      <div class="form-actions">
+        <button type="submit" class="big-btn">保存</button>
+        <button type="button" class="big-btn ghost" id="image-test">测试连接</button>
+        <button type="button" class="big-btn ghost" id="image-back">${backLabel}</button>
+      </div>
     </form>`;
   const status = $("image-status");
-  const baseEl = $("image-base"), userEl = $("image-user"), passEl = $("image-pass");
+  const readSettings = ()=>{
+    const useLora = $("image-mode").value === "4";
+    const next = {...cfg,
+      enabled: $("image-enabled").checked,
+      llmPrompt: $("image-llm-prompt").checked,
+      address: $("image-base").value.trim(),
+      model: $("image-model").value.trim(),
+      steps: useLora ? 4 : 20,
+      lora: useLora,
+      user: $("image-user").value.trim(),
+      pass: $("image-pass").value,
+      style: $("image-style").value.trim()
+    };
+    if(next.user && !next.pass && next.user===cfg.user && qwenEndpoint(next)===qwenEndpoint(cfg)) next.pass = cfg.pass;
+    if(!next.user) next.pass = "";
+    return next;
+  };
   $("image-back").onclick = back;
-  if(back!==showTitle) $("image-back").textContent = "返回设置";
   $("image-test").onclick = async ()=>{
     status.textContent = "测试中……";
-    const base = baseEl.value.trim().replace(/\/+$/,"");
-    const user = userEl.value.trim();
-    const pass = passEl.value || cfg.pass;
-    const headers = {};
-    if(user) headers.Authorization = "Basic " + btoa(user+":"+pass);
     try{
-      const r = await fetch(base+"/system_stats",{headers});
-      status.textContent = r.ok ? "连接成功，ComfyUI 可用。" : "连接失败："+r.status;
+      const next = readSettings();
+      const base = qwenEndpoint(next);
+      const headers = qwenHeaders(next);
+      if(!next.model) throw new Error("请填写模型名");
+      const missing = await QwenWorkflow.missingModels(async node=>{
+        const response = await qwenFetch(base+"/object_info/"+node,{headers});
+        if(response.status===404) return null;
+        return (await (await qwenResponse(response)).json())[node];
+      },{...QwenWorkflow.defaults,unet:next.model,useLora:next.lora});
+      if(missing.length) throw new Error("ComfyUI 缺少 "+missing.join("、"));
+      status.textContent = "连接成功，Qwen 模型和节点已就绪。";
     }catch(e){ status.textContent = "连接失败："+e.message; }
   };
   $("image-form").onsubmit = (e)=>{
     e.preventDefault();
-    const next = {...cfg,
-      enabled: $("image-enabled").checked,
-      base: baseEl.value.trim(),
-      user: userEl.value.trim(),
-      pass: passEl.value || cfg.pass,
-      checkpoint: $("image-checkpoint").value.trim(),
-      style: $("image-style").value.trim()
-    };
+    let next;
+    try{
+      next = readSettings();
+      if(next.enabled){
+        next.address = qwenEndpoint(next);
+        if(!next.model) throw new Error("请填写模型名");
+      }
+    }catch(error){ status.textContent = error.message; return; }
     saveImageCfg(next);
     status.textContent = "已保存。";
     setTimeout(back, 400);
   };
+}
+
+async function requestSceneImage(){
+  const btn = $("btn-scene-img");
+  if(btn.disabled || sceneImageBusy) return;
+  if(!imageCfg().enabled){
+    showImageSettings(()=>$("overlay").classList.add("hidden"),"返回故事");
+    return;
+  }
+  if(!S || (!S.scene && !S.environment?.place)){
+    imageToast("先进入有当前场景的故事，再点 🖼 生成配图。");
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = "…";
+  let waited = 0;
+  imageToast("正在生成当前场景图，请稍等……",0);
+  const progressTimer = setInterval(()=>{
+    waited += 10;
+    imageToast("正在生成当前场景图，请稍等……已等待 "+waited+" 秒",0);
+  },10000);
+  try{
+    if(await resumePendingImage()) return;
+    if(sceneImageBusy) return;
+    sceneImageBusy = true;
+    await generateSceneImage();
+    imageToast("场景图已生成，已插入聊天记录。",3000);
+  }catch(e){
+    imageToast("生成失败："+e.message,7000);
+  }finally{
+    clearInterval(progressTimer);
+    sceneImageBusy = false;
+    btn.disabled = false;
+    btn.textContent = "🖼";
+  }
 }
 
 function showSettings(){
@@ -601,7 +865,7 @@ function showSettings(){
       <header class="home-header"><h1>设置</h1></header>
       <div class="settings-list">
         <button class="big-btn ghost" id="settings-ai">我的 AI 设置<small>API 地址、模型与密钥</small></button>
-        <button class="big-btn ghost" id="settings-image">图像设置<small>ComfyUI 地址与生图开关</small></button>
+        <button class="big-btn ghost" id="settings-image">图像设置<small>Qwen 配图与 ComfyUI 连接</small></button>
       </div>
       <label class="check-line"><input type="checkbox" id="settings-idle-auto" ${idleAutoEnabled()?"checked":""}> 90 秒无操作自动推进剧情（关闭后不会超时结束）</label>
       <label class="check-line"><input type="checkbox" id="settings-story-full" ${storyDetailFull()?"checked":""}> 每幕使用完整叙事规则（更细，切换后下一幕生效）</label>
@@ -678,7 +942,7 @@ async function showTitle(){
   }
   if(card.firstElementChild!==loading) return;
   worlds.sort((a,b)=>b.savedAt-a.savedAt);
-  const isBookRecord = w=>!!w && (w.isBook === true || (w.source === "upload" && !w.bookId && !w.turn && !w.finished));
+  const isBookRecord = w=>!!w && (w.isBook === true || (!w.restoredBackup && w.source === "upload" && !w.bookId && !w.turn && !w.finished));
   const journeys = worlds.filter(w=>!isBookRecord(w));
   const latest = journeys.find(w=>w.turn>0);
   const canReturn = S.ai && S.worldId && isLoggedIn() && journeyOwner===AUTH.username;
@@ -694,7 +958,6 @@ async function showTitle(){
     seenBooks.add(key);
     return true;
   });
-  const collections = [...new Set([...builtins.map(b=>b.collection || "其他书目"), ...(userBooks.length ? ["我的导入"] : [])])];
   const userBookCells = userBooks.map(w=>`
     <div class="builtin-cell">
       <button class="user-book" data-id="${escapeHtml(w.id)}" data-collection="我的导入">
@@ -710,11 +973,6 @@ async function showTitle(){
       ${(builtins.length || userBooks.length) ? `
       <label for="builtin-search" class="sr-only">搜索小说或作者</label>
       <input class="library-search" type="search" id="builtin-search" placeholder="搜索书名或作者">
-      <label class="sr-only" for="builtin-collection">选择书目分类</label>
-      <select class="library-search" id="builtin-collection">
-        <option value="">全部书目</option>
-        ${collections.map(name=>`<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join("")}
-      </select>
       <div class="builtin-grid" id="builtin-grid">
         ${builtins.map(b=>{
           const name = bookDisplayTitle(b.id,b.title);
@@ -734,11 +992,15 @@ async function showTitle(){
       ` : `<p class="form-note">书库已空。可以恢复已隐藏的书，或导入自己的 TXT。</p>`}
       ${hiddenCount ? `<button class="big-btn ghost restore-books" id="restore-books">恢复已隐藏的 ${hiddenCount} 本书</button>` : ""}
     </details>` : "";
-  const shelf = journeys.length ? `
-    <details class="library">
+  const shelf = isLoggedIn() ? `
+    <details class="library" id="journey-shelf" ${journeys.length ? "" : "open"}>
       <summary>我的旅途 <span>${journeys.length} 份记录</span></summary>
+      <div class="journey-tools">
+        <button class="big-btn ghost" id="journey-restore" type="button">导入旅途备份</button>
+        <input type="file" id="restore-journey-file" accept=".json,application/json" hidden>
+      </div>
       <div class="world-list">
-        ${journeys.map(w=>{
+        ${journeys.length ? journeys.map(w=>{
           const meta = [w.genre,w.finished ? "已完结" : w.turn ? "第 "+w.turn+" 幕" : "尚未开始",w.scene?.slice(0,28)].filter(Boolean);
           return `<div class="world-row">
             <button class="world-open" data-id="${escapeHtml(w.id)}">
@@ -746,9 +1008,10 @@ async function showTitle(){
               <span class="w-meta">${escapeHtml(meta.join(" · "))}</span>
             </button>
             <button class="world-ren" data-id="${escapeHtml(w.id)}" data-name="${escapeHtml(w.name)}" aria-label="重命名 ${escapeHtml(w.name)}">✎</button>
+            <button class="world-ren world-backup" data-id="${escapeHtml(w.id)}" type="button" aria-label="备份 ${escapeHtml(w.name)}" title="导出旅途备份"><span class="world-backup-icon" aria-hidden="true"></span></button>
             <button class="world-del" data-id="${escapeHtml(w.id)}" aria-label="删除 ${escapeHtml(w.name)}">✕</button>
           </div>`;
-        }).join("")}
+        }).join("") : '<p class="empty">还没有旅途。</p>'}
       </div>
     </details>` : "";
   card.innerHTML = `
@@ -780,6 +1043,7 @@ async function showTitle(){
   ov.scrollTop = 0;
   menuNote(error);
   $("btn-paste").onclick = ()=>showPasteWorld();
+  $("btn-scene-img").onclick = requestSceneImage;
   if($("btn-login")) $("btn-login").onclick = showLogin;
   if(!isLoggedIn()) return;
 
@@ -800,50 +1064,50 @@ async function showTitle(){
     }finally{ busy = false; }
   }
   $("btn-settings").onclick = showSettings;
+  card.querySelectorAll(".world-backup").forEach(btn=>{
+    btn.onclick = ()=>menuAction(async()=>{
+      const {saved,missingImages} = await exportJourneyBackup(btn.dataset.id);
+      if(stillHere()) menuNote(saved
+        ? (missingImages ? "已导出旅途备份。原存档已有 "+missingImages+" 张图片缺失。" : "已导出旅途备份。")
+        : "已取消导出。");
+    },"正在整理旅途备份……");
+  });
   if($("btn-return")) $("btn-return").onclick = ()=>enterStory();
   if($("btn-continue")) $("btn-continue").onclick = ()=>menuAction(()=>loadWorld(latest.id,stillHere));
   $("btn-ai").onclick = ()=>showGenreSelect();
-$("btn-scene-img").onclick = async ()=>{
-  const btn = $("btn-scene-img");
-  if(btn.disabled) return;
-  const cfg = imageCfg();
-  if(!cfg.enabled){
-    showImageSettings();
-    imageToast("先在这里启用图像生成、填写 ComfyUI 地址和账号，保存后回到故事点 🖼，它会为当前剧情点生成一张配图。",7000);
-    return;
-  }
-  if(!S || (!S.scene && !S.environment?.place)){
-    imageToast("先进入故事；🖼 会为当前剧情点生成一张配图并插入聊天记录。");
-    return;
-  }
-  btn.disabled = true; btn.textContent = "…";
-  imageToast("正在生成当前场景图，请稍等……",0);
-  try{
-    await generateSceneImage();
-    imageToast("场景图已生成，已插入聊天记录。",3000);
-  }catch(e){
-    imageToast("生成失败："+e.message,7000);
-  }finally{
-    btn.disabled = false; btn.textContent = "🖼";
-  }
-};
   $("btn-import").onclick = ()=>$("file-input").click();
+  $("journey-restore").onclick = ()=>$("restore-journey-file").click();
+  $("restore-journey-file").onchange = event=>{
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if(!file) return;
+    menuAction(async()=>{
+      if(file.size>TAVERN_BACKUP_MAX_BYTES) throw new Error("请选择 48 MB 以内的备份文件");
+      const backup = parseJourneyBackup(await file.text());
+      const world = await restoreJourneyBackup(backup);
+      if(!stillHere()) return;
+      await showTitle();
+      const shelf = $("journey-shelf");
+      if(shelf) shelf.open = true;
+      menuNote("已恢复「"+world.name+"」。"+(backup.legacy ? "旧备份只包含当时的旅途进度。":""));
+    },"正在恢复旅途……");
+  };
   $("file-input").onchange = e=>{
     const file = e.target.files?.[0];
     e.target.value = "";
     if(!file) return;
     menuAction(async ()=>{
-      if(file.size>5*1024*1024) throw new Error("文件过大，请选择 5 MB 以内的 TXT 或 Markdown 文件。");
-      let text = (await file.text()).trim();
+      if(file.size>20*1024*1024) throw new Error("文件过大，请选择 20 MB 以内的 TXT 或 Markdown 文件。");
+      let text = (await readFileText(file, pct=>imageToast("正在读取文件 "+pct+"%",0))).trim();
       if(!text) throw new Error("文件为空，请选择有内容的文档。");
-      if(text.length>500000) throw new Error("设定超过 50 万字符，请先截取需要的章节。");
+      if(text.length>3000000) throw new Error("设定超过 300 万字符，请先截取需要的章节。");
       await autoImportToShelf(file.name, text);
     },"正在读取文件……");
   };
   card.querySelectorAll(".world-open").forEach(btn=>{
     btn.onclick = ()=>menuAction(()=>loadWorld(btn.dataset.id,stillHere));
   });
-  card.querySelectorAll(".world-ren").forEach(btn=>{
+  card.querySelectorAll(".world-ren:not(.world-backup)").forEach(btn=>{
     btn.onclick = ()=>renameWorld(btn.dataset.id,btn.dataset.name);
   });
   card.querySelectorAll(".world-del").forEach(btn=>{
@@ -898,22 +1162,19 @@ $("btn-scene-img").onclick = async ()=>{
   if(restore) restore.onclick = ()=>{ restoreHiddenBooks(); showTitle(); };
   const search = $("builtin-search");
   if(search){
-    const collection = $("builtin-collection");
     const items = [...card.querySelectorAll(".builtin-item,.user-book")];
     const filterBooks = ()=>{
       const query = search.value.trim().toLowerCase();
       let count = 0;
       items.forEach(btn=>{
         const cell = btn.closest(".builtin-cell");
-        const hide = !btn.textContent.toLowerCase().includes(query)
-          || Boolean(collection.value && btn.dataset.collection!==collection.value);
+        const hide = !btn.textContent.toLowerCase().includes(query);
         if(cell) cell.hidden = hide; else btn.hidden = hide;
         if(!hide) count++;
       });
       $("search-empty").hidden = count!==0;
     };
     search.oninput = filterBooks;
-    collection.onchange = filterBooks;
     card.querySelectorAll(".builtin-item").forEach(btn=>{
       btn.onclick = ()=>menuAction(async ()=>{
         const full = await readBuiltinBook(btn.dataset.id);
@@ -986,9 +1247,6 @@ function genreConflictProfile(state){
   if(state.genre==="日常") return GENRE_CONFLICT_PROFILES["日常"];
   if(isRomanceMode(state)) return { label:"恋爱", beat:"心动、试探、坦白、承诺、失约、旧伤、共同经历、和解或离别", avoid:"不要用房租、账单、算账、买菜、邻居闲话、世俗眼光、流言蜚语、催婚逼婚当反复出现的主要事件。" };
   if(state.genre && GENRE_CONFLICT_PROFILES[state.genre]) return GENRE_CONFLICT_PROFILES[state.genre];
-  const t = state.storyTemplate && state.storyTemplate.id;
-  const byTemplate = {"追凶":"悬疑","寻物":"悬疑","身陷":"悬疑","守夜":"恐怖","逃亡":"末日","守护":"奇幻","交易":"科幻","复仇":"武侠","重逢":"恋爱","博弈":"武侠"};
-  if(byTemplate[t]) return GENRE_CONFLICT_PROFILES[byTemplate[t]];
   return { label:"本故事", beat:"已建立的目标、人物利益、世界规则与眼前阻力", avoid:"不要用与当前类型和人物无关的日常琐事填时间。" };
 }
 function genreConflictLine(state){
@@ -1566,7 +1824,7 @@ async function generateWorldBible(text, onProgress){
   const analyses = new Array(chunks.length);
   let nextChunk = 0, doneChunks = 0;
   const totalChunks = chunks.length;
-  if(onProgress) onProgress("正在分析 "+totalChunks+" 段（3 路并行）……");
+  if(onProgress) onProgress("正在分析 "+totalChunks+" 段（3 路并行）……",0,totalChunks);
   async function analyzeChunk(){
     while(true){
       const i = nextChunk++;
@@ -1583,7 +1841,7 @@ async function generateWorldBible(text, onProgress){
       }
       analyses[i] = parsed || {summary:String(raw||"").slice(0,300),characters:[],relationships:[],foreshadowing:[],timeline:[]};
       doneChunks++;
-      if(onProgress) onProgress("已完成 "+doneChunks+"/"+totalChunks+" 段……");
+      if(onProgress) onProgress("已完成 "+doneChunks+"/"+totalChunks+" 段……",doneChunks,totalChunks);
     }
   }
   await Promise.all(Array.from({length:Math.min(3,totalChunks)}, analyzeChunk));
@@ -1603,7 +1861,7 @@ async function generateWorldBible(text, onProgress){
   const foreshadowing = [...new Set(analyses.flatMap(a=>a.foreshadowing||[]))].slice(0,30);
   const timeline = [...new Set(analyses.flatMap(a=>a.timeline||[]))].slice(0,40);
   const chunkSummaries = analyses.map(a=>a.summary).filter(Boolean);
-  if(onProgress) onProgress("正在整理全书概要……");
+  if(onProgress) onProgress("正在整理全书概要……",totalChunks,totalChunks);
   let final = {};
   try{
     const finalRaw = await callLLM([
@@ -1625,6 +1883,15 @@ async function generateWorldBible(text, onProgress){
   };
 }
 
+function readFileText(file,onProgress){
+  return new Promise((resolve,reject)=>{
+    const reader = new FileReader();
+    reader.onprogress = event=>{ if(event.lengthComputable) onProgress?.(Math.round(event.loaded/event.total*100)); };
+    reader.onload = ()=>resolve(String(reader.result||""));
+    reader.onerror = ()=>reject(reader.error||new Error("文件读取失败"));
+    reader.readAsText(file);
+  });
+}
 function importTitleFromFile(fileName){
   const base = String(fileName||"").replace(/^.*[\\/]/,"").replace(/\.[^.]+$/,"").trim();
   return (base || "我的小说").slice(0,120);
@@ -1632,46 +1899,78 @@ function importTitleFromFile(fileName){
 async function autoImportToShelf(fileName,text,explicitTitle=""){
   const title = String(explicitTitle||"").trim().slice(0,120) || importTitleFromFile(fileName);
   const token = AUTH.token;
+  try{ imageToast("",1); }catch(e){}
   const card = $("card");
   $("overlay").classList.remove("hidden");
   card.innerHTML = `
     <div class="home">
       <header class="home-header"><h1>正在导入</h1></header>
       <p class="sub">已读取《${escapeHtml(title)}》${Math.round(text.length/1000)}k 字。系统会自动分析并加入「小说剧本」；可以先返回酒馆，任务会在后台继续。</p>
+      <div class="import-progress" style="height:9px;background:rgba(255,255,255,.14);border-radius:999px;overflow:hidden;margin:10px 0 6px"><div class="import-progress-fill" id="auto-import-bar" style="height:100%;width:2%;background:linear-gradient(90deg,#c9a227,#f4d35e);transition:width .25s"></div></div>
       <p class="form-note" id="auto-import-status" role="status">正在准备……</p>
       <div class="card-btns"><button class="big-btn ghost" id="auto-import-back" type="button">返回酒馆（后台继续）</button></div>
     </div>`;
   const status = $("auto-import-status");
-  const here = ()=>AUTH.token===token && $("auto-import-status")===status;
+  const bar = $("auto-import-bar");
+  let progress = 0;
+  const toast = document.createElement("div");
+  toast.id = "import-toast";
+  toast.className = "import-toast";
+  toast.style.cssText = "position:fixed;left:50%;transform:translateX(-50%);bottom:26px;width:min(92vw,430px);z-index:9999;padding:12px 14px;border-radius:14px;background:rgba(20,18,24,.95);color:#f5e9c8;box-shadow:0 8px 30px rgba(0,0,0,.45);font-size:13px;line-height:1.4;";
+  toast.innerHTML = '<div class="import-toast-label" style="margin-bottom:8px">正在导入……</div><div class="import-progress" style="height:9px;background:rgba(255,255,255,.14);border-radius:999px;overflow:hidden"><div class="import-progress-fill" id="import-toast-bar" style="height:100%;width:0%;background:linear-gradient(90deg,#c9a227,#f4d35e);transition:width .25s"></div></div>';
+  document.body.appendChild(toast);
+  const toastLabel = toast.querySelector(".import-toast-label");
+  const toastBar = $("#import-toast-bar");
   let detached = false;
+  const setProgress = (pct,message)=>{
+    progress = Math.max(progress, Math.min(100, Math.round(Number(pct)||0)));
+    if(bar) bar.style.width = progress+"%";
+    if(toastBar) toastBar.style.width = progress+"%";
+    if(status) status.textContent = message || "正在导入……";
+    if(toastLabel) toastLabel.textContent = (detached ? "后台导入：" : "正在导入：") + (message || "正在导入……") + "（" + progress + "%）";
+  };
+  const finishProgress = (message,failed)=>{
+    setProgress(failed ? progress : 100, message);
+    setTimeout(()=>{ try{ toast.remove(); }catch(e){} }, failed ? 6000 : 3500);
+  };
+  const here = ()=>AUTH.token===token && $("auto-import-status")===status;
   const back = $("auto-import-back");
   if(back) back.onclick = ()=>{ detached = true; showTitle(); };
   let bible = null, summary = "";
   try{
-    if(here()) status.textContent = "正在生成故事圣经……";
-    bible = await generateWorldBible(text, msg=>{ if(here()) status.textContent = msg || "正在生成故事圣经……"; });
+    setProgress(3, "正在生成故事圣经……");
+    bible = await generateWorldBible(text, (msg,done,total)=>{
+      const pct = total ? 5 + Math.round((done/total)*78) : 8;
+      setProgress(pct, msg || "正在生成故事圣经……");
+    });
     summary = (bible && bible.summary) || "";
   }catch(e){
     try{
-      if(here()) status.textContent = "故事圣经生成失败，正在生成全书概要……";
-      summary = await generateWorldSummary(text, msg=>{ if(here()) status.textContent = msg || "正在生成全书概要……"; });
+      setProgress(83, "故事圣经生成失败，正在生成全书概要……");
+      summary = await generateWorldSummary(text, msg=>{
+        setProgress(88, msg || "正在生成全书概要……");
+      });
     }catch(e2){
-      if(here()) status.textContent = "自动分析失败，将直接保存原文……";
+      setProgress(90, "自动分析失败，将直接保存原文……");
     }
   }
-  if(AUTH.token !== token) return;
-  if(here()) status.textContent = "正在写入书架……";
+  if(AUTH.token !== token){ try{ toast.remove(); }catch(e){} return; }
+  setProgress(94, "正在写入书架……");
   try{
+    setProgress(95, "正在写入书架……");
     const {world} = await api("/api/worlds",{method:"POST",body:{
       name:title,text,genre:guessImportGenre(text),source:"upload",createNew:false,
       summary,title,windowStart:0,infiniteMode:false,bible,isBook:true
     }});
     if(!world) throw new Error("书架没有返回这本书");
+    setProgress(97, "正在整理书架……");
     await api("/api/worlds",{method:"POST",body:{
       name:title,text:"",genre:guessImportGenre(text),source:"upload",createNew:false,
       summary,title,windowStart:0,infiniteMode:false,bible,bookId:world.id
     }});
+    setProgress(99, "正在整理书架……");
     const note = "《"+title+"》已加入「小说剧本」，并出现在「我的旅途」中。";
+    finishProgress("导入完成");
     if(!detached || $("menu-note")){
       await showTitle();
       menuNote(note);
@@ -1682,6 +1981,7 @@ async function autoImportToShelf(fileName,text,explicitTitle=""){
       imageToast(note,5000);
     }
   }catch(e){
+    finishProgress("导入失败："+e.message, true);
     if(!detached && !$("menu-note")){ imageToast("导入失败："+e.message,7000); return; }
     await showTitle();
     menuNote("导入失败："+e.message);
@@ -1705,7 +2005,7 @@ function showPasteWorld({name = "",text = ""} = {}){
       <label for="paste-name">旅途名称 / 书名（可选）</label>
       <input id="paste-name" maxlength="80" placeholder="例如：雨夜列车">
       <label for="paste-text">小说正文或世界设定</label>
-      <textarea id="paste-text" rows="6" maxlength="500000" required placeholder="把正文或设定粘贴在这里，最多 50 万字符"></textarea>
+      <textarea id="paste-text" rows="6" maxlength="3000000" required placeholder="把正文或设定粘贴在这里，最多 300 万字符"></textarea>
       <div class="form-note" id="paste-status" role="status"></div>
       <button class="big-btn" type="submit">导入到书架</button>
     </form>`;
@@ -1721,8 +2021,8 @@ function showPasteWorld({name = "",text = ""} = {}){
     e.preventDefault();
     if(busy) return;
     const full = field.value.trim();
-    if(!full || full.length>500000){
-      field.setCustomValidity("请粘贴 1 至 50 万字符的小说片段或设定。");
+    if(!full || full.length>3000000){
+      field.setCustomValidity("请粘贴 1 至 300 万字符的小说片段或设定。");
       field.reportValidity();
       return;
     }
@@ -1787,7 +2087,9 @@ function startJourney(world,openOnEntry = true){
   cancelTurn();
   undoStack = [];
   journeyOwner = AUTH.username;
-  const inferredGenre = world.genre || (world.text ? (guessImportGenre(world.text) || guessGenre(world.text)) : "");
+  // 导入/粘贴的长文本只做保守判定（明显恋爱线才标恋爱）。不要用关键词猜悬疑/恐怖，
+  // 否则一部普通都市小说只要出现一次「案件/失踪」就会被整篇当成悬疑反复审细节。
+  const inferredGenre = world.genre || (world.text ? guessImportGenre(world.text) : "");
   S = {...DEFAULT_STATE(),ai:true,infiniteMode:Boolean(world.infiniteMode),species:world.species||(world.role&&world.role.species)||"",world:world.text||"",worldSource:world.source||"",worldName:world.name||world.title||"",worldStart:world.worldStart||"",worldRole:world.role||null,worldSummary:world.summary||"",worldWindow:world.windowStart||0,worldId:world.id,bookId:world.bookId||"",builtinId:world.builtinId||"",genre:inferredGenre};
   activeBuiltinBible = S.builtinId && world.bible ? world.bible : null;
   if(typeof ensureTimelineState==="function") ensureTimelineState(S);
@@ -1873,8 +2175,10 @@ function startJourney(world,openOnEntry = true){
   else $("action-text").focus();
 }
 function enterStory(){
+  migrateLegacyImages(S);
   npcDetailName = "";
   npcEditName = "";
+  playerEditMode = false;
   $("overlay").classList.add("hidden");
   closeDrawer();
   const title = $("story-title");
@@ -1882,24 +2186,24 @@ function enterStory(){
   title.parentElement.title = title.textContent;
   resetChoiceExpansion();
   $("save-status").textContent = S.turn ? "" : "进度会自动保存";
-  document.querySelectorAll(".side-tab")[0].textContent = "人物";
-  const sideTabs = document.querySelectorAll(".side-tab");
-  const secondTab = sideTabs[1];
-  if(secondTab){
-    secondTab.textContent = S.ai ? "剧情" : "账本";
-    secondTab.style.display = "";
+  // 按 data-tab 定位，别用索引：索引会随模板增删标签而错位，把「任务」改成「物品」。
+  const tabBy = t=>document.querySelector('.side-tab[data-tab="'+t+'"]');
+  const charTab = tabBy("char");
+  if(charTab) charTab.textContent = "人物";
+  const storyTab = tabBy("story");
+  if(storyTab){
+    storyTab.textContent = S.ai ? "剧情" : "账本";
+    storyTab.style.display = "";
   }
-  const thirdTab = sideTabs[2];
-  if(thirdTab){
-    thirdTab.style.display = S.ai ? "" : "none";
-    thirdTab.textContent = "物品";
-    if(!S.ai && thirdTab.classList.contains("active")){
-      thirdTab.classList.remove("active");
-      sideTabs[0].classList.add("active");
-    }
-  }
+  // 「剧情」标签已合并原来的「任务」面板，委托与未了事项都在这里显示。
+  // 物品标签的文案由 refreshSide() 追加数量，这里只保证它可见。
+  const itemsTab = tabBy("items");
+  if(itemsTab) itemsTab.style.display = S.ai ? "" : "none";
   renderLog();
+  setTimeout(resumePendingImage,600);
+  setTimeout(retryPendingTurn,800);
   if(S.ai){ showCurrentScene(""); return; }
+  syncStoryPace();
   refreshStats();
   refreshSide();
   if(S.node==="__end_good" || S.node==="__end_bad") showEnding(S.node==="__end_good");
@@ -1918,44 +2222,116 @@ function startClassic(save){
   if(!save) goNode("start");
 }
 
+function saveTextBytes(value){
+  try{
+    const json = typeof value==="string" ? value : JSON.stringify(value);
+    if(typeof TextEncoder!=="undefined") return new TextEncoder().encode(json).length;
+    return json.length*2;
+  }catch(e){ return 0; }
+}
+
+function formatSaveSize(bytes){
+  const n = Number(bytes)||0;
+  if(n<=0) return "";
+  if(n>=1024*1024) return (n/1048576).toFixed(1)+" MB";
+  return Math.max(1,Math.round(n/1024))+" KB";
+}
+
+// 保存前去掉重复场景文本：日志里同一段旁白只留一次，旧回复只保留叙述/台词/推进，
+// 场景历史里与上一条相同的原文不再重复存。只做去重，不改动剧情内容。
+function slimSaveText(save){
+  if(!save || typeof save!=="object") return save;
+  if(Array.isArray(save.log)){
+    const seenNarr = new Set();
+    save.log = save.log.filter(entry=>{
+      const text = String(entry && entry.text || "").trim();
+      if(!text) return true;
+      if(entry.t==="narr"){
+        const key = text.slice(0,120);
+        if(seenNarr.has(key)) return false;
+        seenNarr.add(key);
+      }
+      return true;
+    });
+  }
+  if(Array.isArray(save.history) && typeof readScene==="function"){
+    let lastAssistant = -1;
+    save.history.forEach((message,index)=>{ if(message && message.role==="assistant") lastAssistant = index; });
+    save.history = save.history.map((message,index)=>{
+      if(!message || message.role!=="assistant" || index===lastAssistant) return message;
+      try{
+        const scene = readScene(message.content);
+        const narration = scene.lines.filter(line=>line.t==="narr").map(line=>line.text).join("\n");
+        const beats = scene.lines.filter(line=>line.who).map(line=>({
+          kind:line.t==="npc-action" ? "action" : "say",
+          who:line.who,text:line.text,...(line.to ? {to:line.to} : {})
+        }));
+        return {...message,content:JSON.stringify({narration,beats,scene:scene.scene,advance:scene.advance})};
+      }catch(e){ return message; }
+    });
+  }
+  if(Array.isArray(save.sceneHistory)){
+    let prevScene = "", prevSummary = "";
+    save.sceneHistory = save.sceneHistory.map(entry=>{
+      if(!entry) return entry;
+      const next = {...entry};
+      if(next.scene && next.scene===prevScene) next.scene = "";
+      else prevScene = next.scene || prevScene;
+      if(next.summary && next.summary===prevSummary) next.summary = "";
+      else prevSummary = next.summary || prevSummary;
+      return next;
+    });
+  }
+  return save;
+}
+
 function pruneStateForSave(state){
   const save = {...state};
   save.history = (state.history||[]).slice(-10);
   save.log = (state.log||[]).slice(-80);
   save.memory = (state.memory||[]).slice(-20);
   save.longTerm = String(state.longTerm||"").slice(-4000);
-  save.lifeEvents = (state.lifeEvents||[]).slice(-80);
   save.lifeReactions = (state.lifeReactions||[]).slice(-80);
   save.consequences = (state.consequences||[]).slice(-40);
   save.anchors = (state.anchors||[]).slice(-24);
   save.sceneHistory = (state.sceneHistory||[]).slice(-8);
   save.llmMetrics = (state.llmMetrics||[]).slice(-12);
+  save.turnStats = (state.turnStats||[]).slice(-30);
   delete save.npcEnrichPending;
   delete save.filteredSpeakers;
-  return save;
+  delete save._effectIssues;
+  delete save.holdTimeTurn;
+  return slimSaveText(save);
 }
 
-async function saveProgress(manual = false){
-  const state = S;
+async function saveProgress(manual = false, {allowOpening=false, reportError=false, state=S} = {}){
   const status = (message)=>{
     if(S!==state) return;
     $("save-status").textContent = message;
     if($("ending-status")) $("ending-status").textContent = message;
   };
-  if(!state.ai){
-    try{ localStorage.setItem(CLASSIC_KEY,JSON.stringify(pruneStateForSave(state))); status("已保存在此浏览器"); }
-    catch(e){ status("此浏览器无法保存进度"); }
+  if(state.ai && !state.turn && !allowOpening){
+    if(manual) status("完成第一幕后可以保存");
     return;
   }
-  if(!state.turn){ if(manual) status("完成第一幕后可以保存"); return; }
-  const {world, ...rawSave} = state;
-  const save = pruneStateForSave(rawSave);
   const token = AUTH.token;
   status("正在保存……");
-  const operation = saveQueue.then(()=>api("/api/save",{method:"PUT",body:{id:state.worldId,save},token}));
+  const operation = saveQueue.then(async()=>{
+    await migrateLegacyImages(state);
+    if(!state.ai){
+      const json = JSON.stringify(pruneStateForSave(state));
+      lastSaveBytes = saveTextBytes(json);
+      localStorage.setItem(CLASSIC_KEY,json);
+      return;
+    }
+    const {world, ...rawSave} = state;
+    const pruned = pruneStateForSave(rawSave);
+    lastSaveBytes = saveTextBytes(pruned);
+    await api("/api/save",{method:"PUT",body:{id:state.worldId,save:pruned},token});
+  });
   saveQueue = operation.catch(()=>{});
-  try{ await operation; status("进度已保存"); }
-  catch(e){ status("保存失败："+e.message); }
+  try{ await operation; status(state.ai ? ("进度已保存 · "+formatSaveSize(lastSaveBytes)) : ("已保存在此浏览器 · "+formatSaveSize(lastSaveBytes))); }
+  catch(e){ status("保存失败："+e.message); if(reportError) throw e; }
 }
 
 async function loadWorld(id,stillHere){
@@ -1978,7 +2354,7 @@ async function loadWorld(id,stillHere){
     if(!stillHere()) return;
   }
   if(typeof world.builtinId==="string" && /^novel_[a-z]+$/.test(world.builtinId)){
-    world.text = (await readBuiltinBook(world.builtinId)).text;
+    if(!world.restoredBackup || !world.text) world.text = (await readBuiltinBook(world.builtinId)).text;
     if(!world.bible){
       world.bible = await readBuiltinBook(world.builtinId,{bible:true,optional:true});
     }
@@ -1991,6 +2367,7 @@ async function loadWorld(id,stillHere){
   if(!save){ startJourney(world); return; }
   journeyOwner = AUTH.username;
   S = {...DEFAULT_STATE(),...save,ai:true,infiniteMode:save.infiniteMode ?? Boolean(world.infiniteMode),species:save.species||(world.role&&world.role.species)||"",world:save.world||world.text||"",worldSource:world.source||"",worldName:world.name,worldId:id,builtinId:world.builtinId||""};
+  S.genre = save.genre || world.genre || "";
   undoStack = [];
   activeBuiltinBible = S.builtinId && world.bible ? world.bible : null;
   if(typeof ensureTimelineState==="function") ensureTimelineState(S);
@@ -2029,7 +2406,7 @@ async function loadWorld(id,stillHere){
       }catch(e){}
     }
   }
-  if(!S.choices.length && !S.ending){
+  if(S.turn>0 && !S.choices.length && !S.ending){
     const last = S.history.findLast(h=>h.role==="assistant");
     try{
       const scene = readScene(last.content);
@@ -2050,10 +2427,15 @@ async function loadWorld(id,stillHere){
     if(!Array.isArray(S.social)) S.social = [];
     if(S.health===undefined) S.health = 100;
     if(S.debt===undefined) S.debt = 0;
-    if(S.age===undefined) S.age = 30;
+    if(S.age===undefined && !S.playerProfileEdits?.age) S.age = 30;
   }
   ensureEconomy(S);
     ensureAvatars(S);
   enterStory();
 }
+
+document.addEventListener("visibilitychange",()=>{ if(document.visibilityState==="visible"){ resumePendingImage(); retryPendingTurn(); } });
+window.addEventListener("online",()=>{ resumePendingImage(); retryPendingTurn(); });
+setTimeout(resumePendingImage,1500);
+setTimeout(retryPendingTurn,1800);
 

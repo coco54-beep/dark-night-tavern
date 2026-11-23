@@ -1,7 +1,7 @@
 "use strict";
 /* ==================== 本地长期记忆数据库（IndexedDB） ==================== */
 const TAVERN_DB_NAME = "tavern_memory_v1";
-const TAVERN_DB_VERSION = 1;
+const TAVERN_DB_VERSION = 2;
 const SEMANTIC_MEMORY_KEY = "tavern_semantic_memory_v1";
 const MEMORY_FIRST_KEY = "tavern_memory_first_v1";
 let tavernDbPromise = null;
@@ -112,6 +112,9 @@ function tavernDbOpen(){
       if(!db.objectStoreNames.contains("worlds")){
         db.createObjectStore("worlds",{keyPath:"worldId"});
       }
+      if(!db.objectStoreNames.contains("world_texts")){
+        db.createObjectStore("world_texts",{keyPath:"id"});
+      }
     };
     req.onsuccess = ()=>resolve(req.result);
     req.onerror = ()=>reject(req.error || new Error("数据库打开失败"));
@@ -173,6 +176,32 @@ async function tavernDbPutWorld(meta){
   }catch(e){ return false; }
 }
 
+async function tavernDbPutWorldText(id,text){
+  try{
+    const db = await tavernDbOpen();
+    await tavernDbStore(db,"world_texts","readwrite",os=>os.put({id:String(id),text:String(text||"")}));
+    return true;
+  }catch(e){ return false; }
+}
+
+async function tavernDbGetWorldText(id){
+  try{
+    const db = await tavernDbOpen();
+    return await tavernDbStore(db,"world_texts","readonly",os=>{
+      const req = os.get(String(id));
+      return new Promise((resolve,reject)=>{ req.onsuccess=()=>resolve(req.result && typeof req.result.text==="string" ? req.result.text : ""); req.onerror=()=>reject(req.error); });
+    });
+  }catch(e){ return ""; }
+}
+
+async function tavernDbDeleteWorldText(id){
+  try{
+    const db = await tavernDbOpen();
+    await tavernDbStore(db,"world_texts","readwrite",os=>os.delete(String(id)));
+    return true;
+  }catch(e){ return false; }
+}
+
 async function tavernDbRecentEvents(worldId, limit=320, include=()=>true){
   try{
     const db = await tavernDbOpen();
@@ -182,6 +211,32 @@ async function tavernDbRecentEvents(worldId, limit=320, include=()=>true){
     });
     return list.filter(include).sort((a,b)=>(b.turn||0)-(a.turn||0)).slice(0,limit);
   }catch(e){ return []; }
+}
+
+async function tavernDbRankedEvents(worldId, visible, scoreEvent, limit){
+  try{
+    const db = await tavernDbOpen();
+    return await tavernDbStore(db,"events","readonly",store=>new Promise((resolve,reject)=>{
+      const best = [];
+      const compare = (a,b)=>b.score-a.score || (b.e.turn||0)-(a.e.turn||0);
+      const req = store.index("worldId").openCursor(worldId);
+      req.onerror = ()=>reject(req.error);
+      req.onsuccess = ()=>{
+        const cursor = req.result;
+        if(!cursor){ resolve(best); return; }
+        const e = cursor.value;
+        if(visible(e)){
+          const row = {e,score:scoreEvent(e)};
+          if(row.score>=5 && (best.length<limit || compare(row,best.at(-1))<0)){
+            best.push(row);
+            best.sort(compare);
+            if(best.length>limit) best.pop();
+          }
+        }
+        cursor.continue();
+      };
+    }));
+  }catch(error){ return []; }
 }
 
 async function tavernDbMemories(worldId, names, limit=40){
@@ -210,7 +265,15 @@ function tavernKeywordScore(text, event){
 
 function memoryPeople(state,action,target){
   const names = new Set(target ? [target] : (state.present||[]));
-  for(const c of state.cast||[]) if(c?.name && action.includes(c.name)) names.add(c.name);
+  for(const c of state.cast||[]){
+    if(!c?.name) continue;
+    const aliases = c.profileAliases||[];
+    if(names.has(c.name) || aliases.some(name=>names.has(name))
+      || (!target && (action.includes(c.name) || aliases.some(name=>name && action.includes(name))))){
+      names.add(c.name);
+      for(const name of aliases) names.add(name);
+    }
+  }
   return names;
 }
 
@@ -242,12 +305,9 @@ async function retrieveRelevantMemory(state, action="",target=""){
   const scope = timelineScope(state);
   const visible = e=>e && e.turn<=state.turn && timelineVisible(e,scope) && Array.isArray(e.knownBy)
     && e.knownBy.some(n=>n!=="玩家" && names.has(n));
-  const [events,queryVecs] = await Promise.all([
-    tavernDbRecentEvents(worldId,320,visible),
-    embedTexts([queryText]).catch(()=>null)
-  ]);
+  const queryVecs = await embedTexts([queryText],1200);
   const queryVec = queryVecs && queryVecs[0];
-  const scored = (events||[]).filter(visible).map(e=>{
+  const scored = await tavernDbRankedEvents(worldId,visible,e=>{
     let score = (e.importance||2)*2;
     if(e.status==="open") score += 3;
     if((e.participants||[]).some(n=>names.has(n))) score += 4;
@@ -256,9 +316,8 @@ async function retrieveRelevantMemory(state, action="",target=""){
     if(queryVec && Array.isArray(e.vector) && e.vector.length===queryVec.length){
       score += Math.round(Math.max(0,cosineSimilarity(queryVec,e.vector))*30);
     }
-    return {e,score};
-  }).filter(x=>x.score>=5).sort((a,b)=>b.score-a.score)
-    .slice(0, memoryFirstForState(state) ? 14 : 10);
+    return score;
+  },memoryFirstForState(state) ? 14 : 10);
   const maxLen = memoryFirstForState(state) ? 2200 : 1600;
   const lines = commitments.length ? ["【先找回相关旧承诺】"+commitments.join("\n")] : [];
   let length = lines.join("\n").length;

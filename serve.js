@@ -7,6 +7,7 @@ const crypto = require("crypto");
 const zlib = require("zlib");
 const dns = require("dns");
 const net = require("net");
+const { createQwenImages } = require("./qwen-images");
 
 const ROOT = __dirname;
 const DATA = process.env.TAVERN_DATA_DIR || path.join(ROOT, "data");
@@ -29,6 +30,7 @@ if (!SESSION_SECRET) {
   SESSION_SECRET = crypto.randomBytes(32).toString("hex");
   try { fs.mkdirSync(DATA, { recursive: true }); fs.writeFileSync(SESSION_SECRET_FILE, SESSION_SECRET, "utf8"); } catch {}
 }
+const qwenImages = createQwenImages({ secret: SESSION_SECRET, sendJSON, readBody });
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 天免登录
 const revokedTokens = new Set();
 function signSession(user) {
@@ -211,9 +213,11 @@ function handleError(res, err) {
   if (!res.headersSent) sendJSON(res, 500, { error: "酒馆暂时无法处理请求" });
   else res.destroy();
 }
-function readBody(req, res, handle, limit = 4 * 1024 * 1024) {
+function readBody(req, res, handle, limit = 32 * 1024 * 1024) {
   const chunks = [];
   let size = 0;
+  const total = Number(req.headers["content-length"]) || 0;
+  let lastLogged = 0;
   req.on("error", () => {});
   req.on("data", chunk => {
     if (size > limit) return;
@@ -222,6 +226,10 @@ function readBody(req, res, handle, limit = 4 * 1024 * 1024) {
     else {
       chunks.length = 0;
       sendJSON(res, 413, { error: "请求内容太大" });
+    }
+    if (total > 1024 * 1024 && Date.now() - lastLogged > 2000) {
+      lastLogged = Date.now();
+      console.log("[body] " + req.method + " " + req.url + " " + Math.round(size / total * 100) + "% (" + (size / 1048576).toFixed(1) + "/" + (total / 1048576).toFixed(1) + " MB)");
     }
   });
   req.on("end", () => {
@@ -236,6 +244,7 @@ function readBody(req, res, handle, limit = 4 * 1024 * 1024) {
 }
 
 const sessions = new Map();
+const backupTokens = new Map();
 const SESSION_TTL = 24 * 60 * 60 * 1000;
 const loginAttempts = new Map();
 setInterval(() => {
@@ -401,9 +410,10 @@ function worldRoutes(req, res, user, url, route) {
   }
   if (route === "/api/worlds" && req.method === "POST") {
     return readBody(req, res, p => {
+      if (String(p.text || "").length > 100000) console.log("[worlds] POST " + String(p.name || "") + " " + String(p.text || "").length + " chars");
       const name = typeof p.name === "string" ? p.name.trim() : "";
-      if (!name || name.length > 255 || typeof p.text !== "string" || p.text.length > 500000) {
-        return sendJSON(res, 400, { error: "无效的旅途名称或设定" });
+      if (!name || name.length > 255 || typeof p.text !== "string" || p.text.length > 3000000) {
+        return sendJSON(res, 400, { error: "旅途名称或文本无效（最多 300 万字符）" });
       }
       const worlds = readJSON(worldsFile, []);
       const isBook = p.isBook === true;
@@ -503,6 +513,47 @@ function worldRoutes(req, res, user, url, route) {
       sendJSON(res, 200, { ok: true });
     });
   }
+  if (route === "/api/backup/export" && req.method === "POST") {
+    return readBody(req, res, p => {
+      let world = null, save = null;
+      if (p.backup && p.backup.world && p.backup.save) {
+        world = p.backup.world;
+        save = p.backup.save;
+      } else if (validId(p.id)) {
+        const worlds = readJSON(worldsFile, []);
+        world = worlds.find(w => w.id === p.id) || null;
+        save = readJSON(userFile(user, "save_" + p.id + ".json"), null);
+      }
+      if (!world) return sendJSON(res, 404, { error: "没有找到这段旅途" });
+      if (!save) return sendJSON(res, 404, { error: "这段旅途还没有存档" });
+      const payload = { format: "tavern-journey-backup", version: 1, exportedAt: new Date().toISOString(), world, save };
+      const token = crypto.randomBytes(18).toString("hex");
+      const filename = "journey-backup-" + new Date().toISOString().slice(0, 10) + ".json";
+      const file = userFile(user, "backups/backup_" + token + ".json");
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, JSON.stringify(payload), { encoding: "utf8", mode: 0o600 });
+      backupTokens.set(token, { file, filename, expires: Date.now() + 10 * 60 * 1000 });
+      sendJSON(res, 200, { url: "/api/backup/download?token=" + token, filename });
+    });
+  }
+  if (route === "/api/backup/download" && req.method === "GET") {
+    const token = url.searchParams.get("token") || "";
+    const rec = backupTokens.get(token);
+    if (!rec || rec.expires < Date.now()) return sendJSON(res, 404, { error: "备份已过期，请重新导出" });
+    backupTokens.delete(token);
+    let data;
+    try { data = fs.readFileSync(rec.file); }
+    catch (err) { return sendJSON(res, 404, { error: "备份文件不存在" }); }
+    res.writeHead(200, {
+      "Content-Type": "application/json; charset=utf-8",
+      "Content-Disposition": "attachment; filename=\"" + rec.filename.replace(/"/g, "") + "\"",
+      "Content-Length": data.length,
+      "Cache-Control": "no-store"
+    });
+    res.end(data);
+    try { fs.unlinkSync(rec.file); } catch (err) {}
+    return;
+  }
   if (route === "/api/save" && req.method === "GET") {
     const id = url.searchParams.get("id");
     if (!validId(id)) return sendJSON(res, 400, { error: "无效的旅途编号" });
@@ -574,6 +625,27 @@ function route(req, res) {
   } catch { return sendJSON(res, 400, { error: "无效的请求路径" }); }
   if (pathname === "/api/register" && req.method === "POST") return sendJSON(res, 403, { error: "注册已关闭" });
   if (pathname === "/api/login" && req.method === "POST") return login(req, res);
+  if (pathname.startsWith("/api/images/qwen/")) {
+    return qwenImages(req, res, pathname.slice("/api/images/qwen".length)).catch(err => handleError(res, err));
+  }
+  if (pathname === "/api/backup/download" && req.method === "GET") {
+    const token = url.searchParams.get("token") || "";
+    const rec = backupTokens.get(token);
+    if (!rec || rec.expires < Date.now()) return sendJSON(res, 404, { error: "备份已过期，请重新导出" });
+    backupTokens.delete(token);
+    let data;
+    try { data = fs.readFileSync(rec.file); }
+    catch (err) { return sendJSON(res, 404, { error: "备份文件不存在" }); }
+    res.writeHead(200, {
+      "Content-Type": "application/json; charset=utf-8",
+      "Content-Disposition": "attachment; filename=\"" + rec.filename.replace(/"/g, "") + "\"",
+      "Content-Length": data.length,
+      "Cache-Control": "no-store"
+    });
+    res.end(data);
+    try { fs.unlinkSync(rec.file); } catch (err) {}
+    return;
+  }
   if (!pathname.startsWith("/api/")) return serveStatic(req, res, pathname);
   const user = authUser(req);
   if (!user) return sendJSON(res, 401, { error: "登录已失效，请重新登录" });
