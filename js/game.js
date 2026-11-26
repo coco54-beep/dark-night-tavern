@@ -1283,6 +1283,54 @@ function genrePlaybookLine(state){
   const text = rules[genreConflictProfile(state).label];
   return text ? "【类型执行规则】"+text : "";
 }
+const GENRE_OPENING_LINES = {
+  "悬疑": "先给一个具体、可调查的异常：谁发现了什么、哪里对不上；给玩家至少一个能查看、核对或对质的具体对象，不要先揭答案。",
+  "奇幻": "让玩家直接碰到一条具体的魔法/契约/遗迹规则，并显出它的代价或禁忌；不要用现代日常纠纷开场。",
+  "武侠": "开场落在江湖立场或规矩上：谁在逼谁、欠谁人情、哪条道被封；给玩家一个要当场表态或动手的处境。",
+  "科幻": "用一个具体的系统/协议/资源故障影响玩家，给出可操作的技术或制度选择；不要用古代家务开场。",
+  "恐怖": "用一个可追踪的具体异常迹象建立压迫（声音、痕迹、失踪、灯灭）；不要一次性揭示怪物或原因。",
+  "恋爱": "开场必须先建立关系张力：一个让玩家在意或心动的人、一次试探/重逢/暧昧/疏远。chapter.goal 必须写成关系目标（例如「弄清她为什么突然疏远」「在今晚的相处里让彼此把话说明白」），不得出现查案、旧案、旧怨、真相、凶手、委托、差事、守夜、送货、工作等词；给玩家靠近、试探、退开或表明态度的选择。",
+  "末日": "开场立刻让资源、防线或污染的具体缺口影响玩家，给出争夺、节省或冒险的选择；不要用稳定日常开场。",
+  "日常": "开场必须是一个具体、可参与的生活场景：地点、时间、人在做什么、眼前的小选择。chapter.goal 必须写成生活/关系目标（例如「把空房收拾出来，和邻居吃顿饭」「弄清掌柜今天为什么心不在焉」），不得把送货、接活、买卖、差事、营生作为主目标，也不要用死亡、失踪、凶案、怪物或恐怖事件开场；最多一个轻钩子。",
+  "随机": "先按已建立的世界与人物给一个具体目标和阻力，停在玩家能马上行动的地方；不要用与设定无关的琐事开场。"
+};
+function genreOpeningLine(state){
+  if(!state || state.world || state.turn || !state.genre) return "";
+  const line = GENRE_OPENING_LINES[state.genre];
+  return line ? "【类型开场】"+line : "";
+}
+const DAILY_HEAVY_RE = /死者|尸体|凶案|命案|谋杀|血案|惨死|分尸|鬼|怪物|恐怖|绑架|丧尸/;
+const DAILY_CUE_RE = /茶|饭|酒馆|店里|街|雨|窗|桌|灯|邻居|掌柜|伙计|客人|收拾|做饭|闲聊|作息|睡|醒|灶|汤|碗/;
+const DAILY_WORK_RE = /送货|接活|差事|买卖|雇佣|搬货|委托|任务|报酬|上工|看船|守夜|营生|活计|浆洗|旧账|还债|还钱|工钱|做活|零工|找活/;
+const ROMANCE_CUE_RE = /心动|喜欢|暧昧|想念|重逢|旧情|亲近|表白|约会|情意|脸红|心跳|拥抱|牵手|目光|靠近|试探|疏远|在意|回来|离开|留下|见面/;
+const ROMANCE_GOAL_BAD_RE = /守夜|看船|差事|活儿|工作|接活|送货|买卖|委托|任务|报酬|上工|调查|追查|查清|查明|真相|案|凶手|旧怨|仇|底细/;
+function openingGenreIssue(scene,state){
+  if(!scene || scene.prose || scene.ending || !state || state.turn || !state.ai || state.world || !state.genre) return "";
+  const text = [scene.narration,scene.summary,scene.advance,
+    scene.plot?.goal,scene.plot?.conflict,scene.plot?.next,
+    scene.chapter?.goal,scene.chapter?.stakes,
+    ...(scene.lines||[]).map(l=>l && l.text),
+    ...(scene.choices||[]).map(c=>c && c.text)
+  ].filter(Boolean).join(" ");
+  const goalText = [scene.chapter?.goal,scene.plot?.goal,scene.plot?.conflict].filter(Boolean).join(" ");
+  if(state.genre==="日常"){
+    if(DAILY_HEAVY_RE.test(text)){
+      return "日常开场不能以死亡、凶案、失踪、怪物或恐怖事件开场。请改成一个具体、可参与的生活场景（地点、时间、人在做什么），最多埋一个轻钩子（邻里传闻、旧物、小误会），再给 2~3 个生活化的选择。";
+    }
+    if(DAILY_WORK_RE.test(goalText)){
+      return "日常开场不要把送货、接活、买卖、差事或营生作为主目标。请先写人物相处和生活场景，钩子最多是邻里传闻、旧物或小误会；营生只放在背景里。";
+    }
+    if(!DAILY_CUE_RE.test(text)){
+      return "日常开场需要落到具体的生活场景与人物相处（茶饭、酒馆、街坊、收拾、天气、作息等），不要先抛悬疑或外部事件。";
+    }
+  }
+  if(state.genre==="恋爱"){
+    if(ROMANCE_GOAL_BAD_RE.test(goalText) || !ROMANCE_CUE_RE.test(goalText)){
+      return "恋爱开场必须先建立关系张力：一个让玩家在意或心动的人、一次试探/重逢/暧昧/疏远；主目标必须是关系本身，不能是守夜、送货、接活、差事、委托或查案。请重写开场。";
+    }
+  }
+  return "";
+}
 function genreMoralityLine(state){
   if(isRomanceMode(state)){
     if(relationshipModeOf(state)==="open"){

@@ -1716,6 +1716,42 @@ function settleChapter(state,scene,loopHistory,environment,turn,playerText){
   return {chapter,chapterHistory:[...history,record].slice(-20)};
 }
 
+function chapterStallIssue(scene,state){
+  const ch=state?.chapter;
+  if(!ch || !Number.isFinite(ch.startedTurn) || scene?.ending || scene?.prose) return "";
+  if(ch.outcome || scene?.chapter?.outcome) return "";
+  const turns=(state.turn||0)-ch.startedTurn;
+  if(turns<12) return "";
+  if(Number.isFinite(ch.stallNudgeTurn) && (state.turn||0)-ch.stallNudgeTurn<3) return "";
+  const sameTitle=!scene?.chapter?.title || scene.chapter.title===ch.title;
+  const phase=scene?.chapter?.phase;
+  const progressed=phase==="reversal"||phase==="climax"||phase==="aftermath";
+  if(!sameTitle || progressed) return "";
+  ch.stallNudgeTurn=(state.turn||0)+1;
+  return "当前篇章已经持续 "+(turns+1)+" 幕，主目标还没有结果。本幕必须在 chapter 里给出新 title 开启新篇章，或把 phase 推进到 reversal/climax/aftermath 并写 outcome；只换措辞继续拖同一件事会被退回。";
+}
+
+function staleOrdinaryLoops(state){
+  const loops = (state.openLoops||[]).filter(l=>l && !isStoryCommitment(l));
+  const nowMinute = Number.isFinite(state.environment?.minute) ? state.environment.minute : 0;
+  const turn = state.turn||0;
+  return loops.filter(l=>{
+    const byTurn = Number.isFinite(l.createdTurn) && turn-l.createdTurn>=10;
+    const byMinute = Number.isFinite(l.createdMinute) && nowMinute-l.createdMinute>=480;
+    return byTurn || byMinute;
+  });
+}
+function loopStallIssue(scene,state){
+  if(!scene || scene.prose || scene.ending || !state) return "";
+  if(Number.isFinite(state.loopStallNudgeTurn) && (state.turn||0)-state.loopStallNudgeTurn<3) return "";
+  const stale = staleOrdinaryLoops(state);
+  if(!stale.length) return "";
+  const done = new Set((scene.loopsDone||[]).map(String));
+  if(stale.some(l=>done.has(String(l.id)) || done.has(String(l.text)))) return "";
+  state.loopStallNudgeTurn = (state.turn||0)+1;
+  return "当前有 "+stale.length+" 条未了事项已经持续超过 10 幕（"+stale.slice(0,4).map(l=>"「"+String(l.text||"").slice(0,24)+"」").join("、")+"）。本幕必须用 loopsDone 收回其中至少一条已经过时或已解决的线索（写 id 或原文），或让它在剧情里明确出结果；只换说法继续挂着会被退回。";
+}
+
 function chapterLoopPrompt(state){
   if(state.intimateActive || (state.afterglow||0)>0) return null;
   const loops = (state.openLoops||[]).filter(l=>!isStoryCommitment(l));
@@ -1723,17 +1759,25 @@ function chapterLoopPrompt(state){
   const nowMinute = Number.isFinite(env.minute) ? env.minute : 0;
   const chapterAge = state.chapter && Number.isFinite(state.chapter.startedMinute)
     ? nowMinute - state.chapter.startedMinute : null;
+  const chapterTurns = state.chapter && Number.isFinite(state.chapter.startedTurn)
+    ? Math.max(0,(state.turn||0)-(state.chapter.startedTurn||0)) : null;
   const stale = loops.filter(l=>{
     if(!l) return false;
-    if(Number.isFinite(l.createdMinute) && Number.isFinite(env.minute)) return nowMinute - l.createdMinute >= 720;
-    return (state.turn||0)-(l.createdTurn||state.turn||0) >= 16;
+    const byMinute = Number.isFinite(l.createdMinute) && Number.isFinite(env.minute)
+      && nowMinute - l.createdMinute >= 480;
+    const byTurn = Number.isFinite(l.createdTurn) && (state.turn||0) - l.createdTurn >= 10;
+    return byMinute || byTurn;
   });
-  const needsChapter = !state.chapter || (chapterAge!==null && chapterAge>=480);
+  const needsChapter = !state.chapter || (chapterAge!==null && chapterAge>=240)
+    || (chapterTurns!==null && chapterTurns>=12);
+  const chapterStalled = !needsChapter && state.chapter?.goal
+    && ((chapterAge!==null && chapterAge>=120) || (chapterTurns!==null && chapterTurns>=8));
   const parts = [];
   if(state.chapter?.outcome) parts.push("当前篇章已经有结果。后续从余波和玩家行动自然发展，新篇章要接住旧结果");
   if(state.chapter?.goal && !needsChapter) parts.push("先判断当前篇章目标「"+state.chapter.goal+"」现在还做不做得到：如果还做得到，不要改写，本幕的子目标写进 plot.goal，下一步写进 plot.next，阻力写进 plot.conflict；如果已经不可能达成（活儿被别人接走、关键人物死亡或离开、地点与路线彻底改变、期限已过），本轮必须在 chapter 里带上 goalState:'impossible' 并给出实质不同的新 goal 改写当前篇章目标，或直接换 chapter.title 开启新篇章，同时用 loopsDone 收回绑在旧目标上、已经作废的承诺与未了事项");
   if(!state.chapter) parts.push("本轮必须用 chapter:{title,goal,stakes,next,phase} 建立当前篇章：title 写简短标题，goal 写玩家眼下真正要达成的核心目标（此后本篇章内默认锁定；旧目标确定不可能时用 goalState:'impossible' 改写），stakes 写失败或拖延的代价，next 写眼前能做的下一步，phase 用 setup");
   else if(needsChapter) parts.push("当前篇章已持续较久，故事时间或目标确实推进时，用 chapter:{title,goal,stakes,next,phase} 开启新篇章并接住旧结果；连续对话或同一场景里不要仅因为幕数增加就换篇章。phase 用 setup/complication/reversal/climax/aftermath 之一");
+  if(chapterStalled) parts.push("当前篇章已经持续"+(chapterTurns!==null ? " "+chapterTurns+" 幕" : "较长时间")+(chapterAge!==null ? "（约 "+Math.max(1,Math.round(chapterAge/60))+" 小时）" : "")+"，主目标还没有结果：本幕必须让它发生实质变化（达成、失败、暂缓、换条件或明确期限），或在本幕结束时把 phase 推进到 complication/reversal；不要只换措辞继续拖同一件事");
   if(state.chapter?.previousGoal && Number.isFinite(state.chapter.goalChangedMinute)
     && nowMinute-state.chapter.goalChangedMinute<=360){
     parts.push("篇章目标刚改道：绑在旧目标上、如今已无意义的承诺和未了事项，用 loopsDone 收回，不要继续挂在面板里");
@@ -3703,6 +3747,11 @@ function completeSceneChoices(choices,lines,present,place,plot){
 }
 
 function repairChoicesFromScene(scene,state){
+  scene.choices = (scene.choices||[]).map(c=>{
+    if(!c || c.kind) return c;
+    const kind = typeof choiceKindOf==="function" ? choiceKindOf(c) : "";
+    return kind ? {...c, kind} : c;
+  });
   if(!state.turn || storyDetailFull() || scene.prose || scene.ending
     || scene.choices.filter(c=>!isGenericChoice(c.text)).length>=2) return;
   const possible = (scene.present||state.present||[]).concat(scene.entered||[]);
@@ -3753,6 +3802,8 @@ function validateSceneForTurn(scene, state){
       if(totalText<110) return "本幕文本过短，信息量不足。请补充具体的动作、对话和环境细节，让这一场至少有实质内容。";
     }
   }
+  const openingIssue = typeof openingGenreIssue==="function" ? openingGenreIssue(scene,state) : "";
+  if(openingIssue) return openingIssue;
   return validateSceneConsistency(scene,state);
 }
 
@@ -3877,6 +3928,8 @@ function finalizeSystemPrompt(base, state){
   out.push("【经济只做后台，不推动剧情】收入、物价、房租和结算只用于后台自动记账，不是剧情任务。不要主动安排上班、打工、找工作、接零活、搬货、跑腿、讨薪、催租、买菜、算账，也不要用缺钱、账单或房租逼玩家做选择。时间跳跃时在背景里自动结算收入即可，不要用系统消息催玩家赚钱。只有当玩家主动选择去工作，或剧情自然涉及交易（贿赂、买情报、路费、装备、救人、赌债）时，才写经济内容；其余时候让经济安静地待在背景里。");
   out.push("【人物声线】多人对话里，每个人要用自己的称呼、句式、停顿和态度说话，不能让所有角色都变成同一种短句、同一种试探或同一种沉默；同一件事至少让两个不同人物给出不同立场、不同动作或不同反应。");
   out.push("【反重复与反执念】同一件事、同一场对峙连续多幕后，不要只换一种说法或只把冲突形式换个皮继续磨；必须让当前事情出结果（成、败、暂缓、放弃或改由他人接手），再换目标、地点、对手或时间之一，直接进入下一件不同的事。有新的篇章目标或旧篇已收束时再换标题；时间跳跃可以只推进原篇章。新人物、新证据、新阴谋必须接在已发生的事实、人物动机或已有线索上，避免凭空解决僵局或改写已成立的事实。");
+  const openingLine = typeof genreOpeningLine==="function" ? genreOpeningLine(state) : "";
+  if(openingLine) out.push(openingLine);
   return out.join("\n");
 }
 
@@ -3900,7 +3953,8 @@ const CHOICE_RULES = [
   "三个选项尽量分化成三种不同性质的行动，而不是同一件事的三种说法：(1) 打听/求证——向具体的人问具体的事，或去查一处具体的地方；(2) 冒险/动手——当场做一件有风险的事，例如摊牌、潜入、威胁、付钱、出手、闯进去；(3) 等待/离开/换目标——收手、撤退、暂时放下这件事去做别的，或等某个时机。至少要有两种不同性质，三条全是同一性质会被退回重写。每个选项都用 kind 标明性质：probe（打听/求证）、risk（冒险/动手）、wait（等待/离开/换目标）。等待类选项不是原地空等：选中后时间会前进，局势和 NPC 会自行推进，所以要写清等多久、等谁或等到什么时机。至少有一个选项要写清明确的代价或风险（花一笔钱、得罪某人、欠下人情、可能受伤、错过别的机会、被某人记住），并把代价写进 cost 字段（例如「20 文」「得罪掌柜」「错过末班船」），让玩家能看见选它要付出什么。反例：不要写成「问问情况」「再打听打听」「四处看看」「继续观察」「先等等」这类空泛或同质的选项；也不要三个选项都是向同一个人问同一个问题。",
   "同一目标尽量有不同解法，例如私下向目击者求证、拿已有线索去谈条件、放下这桩事去找安全落脚处。不要把同一种问法换几次措辞，也不要用「继续」「问问情况」「离开」凑数。离开、等候或拒绝同样可以是好选项，写清去哪、等谁或因此放弃什么机会。根据人物动机、关系、时间、天气、随身资源来设计，给资源不足的玩家留实际能做的事。",
   "每项写一条简短 tradeoff，说明角色当下看得出的机会、代价、风险或时间取舍。不要剧透、承诺成功，也不要硬塞数值。已经谈妥的报价、承诺和期限照实写；涉及技能时才标 attr 或 skill。下一幕根据玩家实际采取的办法演出相应后果。",
-  "玩家明确提出的限制（比如原件留在自己手里）约束本幕叙述、NPC 动作和后续选项。玩家询问怎么做时，先展示可选方案，不代玩家执行。只问条件或差价时，等玩家确认再付款、同意欠账或开始住宿。"
+  "玩家明确提出的限制（比如原件留在自己手里）约束本幕叙述、NPC 动作和后续选项。玩家询问怎么做时，先展示可选方案，不代玩家执行。只问条件或差价时，等玩家确认再付款、同意欠账或开始住宿。",
+  "每个选项必须写 kind（probe/risk/wait），并且至少一项写 cost（花多少钱、多少时间、欠什么人情、可能受什么伤、得罪谁、错过什么机会）。缺 kind 或 cost 会被退回重写。"
 ].join("\n");
 
 function continuingTurnRules(){

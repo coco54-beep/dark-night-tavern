@@ -827,6 +827,11 @@ async function aiTurn(choice,retry=null){
       }
       const changeLine = typeof goalChangePrompt==="function" ? goalChangePrompt(state) : null;
       if(changeLine && list.length) list.splice(list.length-1,0,labelPrompt("rules",{role:"system",content:changeLine}));
+      const openingLine = !state.turn && state.genre && !state.world && typeof genreOpeningLine==="function"
+        ? genreOpeningLine(state) : "";
+      if(openingLine && list.length) list.splice(list.length-1,0,labelPrompt("rules",{role:"system",content:openingLine}));
+      if(list.length) list.splice(list.length-1,0,labelPrompt("rules",{role:"system",content:
+        "【输出格式】只输出一个完整 JSON 对象：第一字符 {，最后 }；不要 Markdown、代码块、解释或散文。必须包含 narration、beats、choices、plot、advance、environment、clockCheck；choices 2~3 条，每条写 kind，至少一项写 cost。"}));
       return list;
     };
     const tokenBudget = contextTokenBudget(state);
@@ -843,7 +848,8 @@ async function aiTurn(choice,retry=null){
     promptTokens = promptTokenEstimate(baseMessages);
     contextTokens = promptTokens;
     if(typeof console!=="undefined") console.info("[上下文预算]",{budget:tokenBudget,tokens:promptTokens,compact:usedCompact});
-    let maxAttempts = choice?.endingRequest ? 3 : 2;
+    const openingWithGenre = !state.turn && state.genre && !state.world;
+    let maxAttempts = choice?.endingRequest ? 3 : openingWithGenre ? 3 : 2;
     let jumpAsked = false;
     for(let attempt=0; attempt<maxAttempts; attempt++){
       attempts = attempt + 1;
@@ -1087,9 +1093,27 @@ async function aiTurn(choice,retry=null){
         if(pv) pv.textContent = retryText("正在调整这一幕",maxAttempts);
         continue;
       }
+      const stallIssue = typeof chapterStallIssue==="function" ? chapterStallIssue(scene,state) : "";
+      if(stallIssue){
+        lastErr = new Error(stallIssue);
+        if(attempt>=maxAttempts-1) break;
+        markRetry("chapter-stall",stallIssue);
+        const pv = $("stream-preview");
+        if(pv) pv.textContent = retryText("正在推进当前篇章",maxAttempts);
+        continue;
+      }
+      const loopStall = typeof loopStallIssue==="function" ? loopStallIssue(scene,state) : "";
+      if(loopStall){
+        lastErr = new Error(loopStall);
+        if(attempt>=maxAttempts-1) break;
+        markRetry("loop-stall",loopStall);
+        const pv = $("stream-preview");
+        if(pv) pv.textContent = retryText("正在收回过旧的线索",maxAttempts);
+        continue;
+      }
       // 模型写成散文：先尝试重生成一次，仍不行再接受散文兜底
       if(scene.prose && attempt===0){
-        lastErr = new Error("剧情格式无法解析，请重试");
+        lastErr = new Error("上一版是散文，不是 JSON。请只输出一个完整 JSON 对象：第一字符 {，最后 }；不要解释、Markdown 或代码块；必须包含 narration、beats、choices、plot、advance、environment、clockCheck。");
         markRetry("prose","模型返回散文，不是完整 JSON");
         const pv = $("stream-preview");
         if(pv) pv.textContent = retryText("格式不合，正在重写",maxAttempts);
