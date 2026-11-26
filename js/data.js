@@ -249,6 +249,41 @@ function saveSingleLLM(cfg){ try{ localStorage.setItem(SINGLE_LLM_KEY, JSON.stri
 function singleWorlds(){ try{ return JSON.parse(localStorage.getItem(SINGLE_WORLDS_KEY)||"[]"); }catch(e){ return []; } }
 function saveSingleWorlds(list){ try{ localStorage.setItem(SINGLE_WORLDS_KEY, JSON.stringify(list)); }catch(e){ throw new Error("本地存储空间不足，无法保存这段旅途"); } }
 function singleSaveKey(id){ return "tavern_single_save_"+id; }
+
+/* ===== 界面主题 ===== */
+const THEME_KEY = "tavern_theme_v1";
+const THEMES = [
+  {id:"tavern",name:"暗夜酒馆",desc:"琥珀灯影与旧木",meta:"#1a1410",colors:["#1a1410","#d4a24c","#e8dcc8"]},
+  {id:"moon",name:"冷月渡口",desc:"深蓝夜色与银青",meta:"#0d141c",colors:["#0d141c","#9cc3e6","#dbe7f2"]},
+  {id:"wine",name:"绯夜酒红",desc:"酒渍、烛泪与暗金",meta:"#180b10",colors:["#180b10","#d9a15e","#f0dfe4"]},
+  {id:"forest",name:"苔庭旧绿",desc:"林间湿气与铜锈",meta:"#0e1611",colors:["#0e1611","#c9b06a","#e0e8dd"]},
+  {id:"ash",name:"灰烬长夜",desc:"铁灰、烟尘与冷白",meta:"#101112",colors:["#101112","#c9c9c9","#e8e8e8"]}
+];
+function themeById(id){
+  return THEMES.find(t=>t.id===id) || THEMES[0];
+}
+function currentTheme(){
+  try{ return themeById(localStorage.getItem(THEME_KEY)).id; }catch(e){ return THEMES[0].id; }
+}
+function applyTheme(id, persist=true){
+  const theme = themeById(id);
+  if(persist){ try{ localStorage.setItem(THEME_KEY, theme.id); }catch(e){} }
+  if(typeof document!=="undefined" && document.documentElement){
+    document.documentElement.dataset.theme = theme.id;
+    const meta = typeof document.querySelector==="function" ? document.querySelector('meta[name="theme-color"]') : null;
+    if(meta) meta.setAttribute("content", theme.meta);
+    if(typeof document.querySelectorAll==="function"){
+      document.querySelectorAll(".theme-btn").forEach(btn=>{
+        const active = btn.dataset && btn.dataset.theme===theme.id;
+        btn.classList.toggle("active", active);
+        btn.setAttribute("aria-pressed", active ? "true" : "false");
+      });
+    }
+  }
+  return theme;
+}
+if(typeof document!=="undefined" && document.documentElement) applyTheme(currentTheme(), false);
+
 // 通过 ?single=1 或 file:// 进入后记住单机模式，下次直接进
 try{
   if(location.protocol==="file:" || (typeof URLSearchParams!=="undefined" && new URLSearchParams(location.search).get("single")==="1")) localStorage.setItem(SINGLE_KEY,"1");

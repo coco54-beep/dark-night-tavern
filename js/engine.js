@@ -123,6 +123,32 @@ function hasAmbientDusk(text){
 }
 const NEXT_DAY_RE = /(?:到了|已是)第二天|第二天一早|第二天早上|次日一早|次日清晨|隔天清晨|翌日清晨/;
 
+function parseClockText(text){
+  const s=String(text||"").trim();
+  let m=/^(\d{1,2})\s*[:：]\s*(\d{1,2})$/.exec(s);
+  if(m && Number(m[1])<24 && Number(m[2])<60) return Number(m[1])*60+Number(m[2]);
+  m=/^(\d{1,2})\s*[点时]\s*(\d{1,2})?\s*分?$/.exec(s);
+  if(m && Number(m[1])<24 && (m[2]===undefined || Number(m[2])<60)) return Number(m[1])*60+Number(m[2]||0);
+  return null;
+}
+
+function clockCheckMismatch(scene,environment,state){
+  const raw=String(scene?.clockCheck||"").trim();
+  if(!raw) return "";
+  const parsed=parseClockText(raw);
+  if(parsed===null) return "";
+  const minute=Number.isFinite(environment?.minute) ? environment.minute : null;
+  if(minute===null) return "";
+  const actual=((minute%1440)+1440)%1440;
+  const diff=Math.abs(parsed-actual);
+  const wrap=Math.min(diff,1440-diff);
+  if(wrap<=30) return "";
+  const add=((parsed-actual)+1440)%1440;
+  const nowText=formatStoryTime(minute,state);
+  return "你写的 clockCheck 是 "+raw+"，但环境时钟是 "+nowText+"。要么用 environment.elapsedMinutes 推进约 "+add
+    +" 分钟到那个时刻，要么把 clockCheck 和旁白改回当前时刻";
+}
+
 function timeOfDayMismatch(scene,environment,state){
   const lines = [];
   if(scene?.narration) lines.push(scene.narration);
@@ -801,7 +827,7 @@ function requiresFullTurnContext(state,choice){
   if(!state.turn || choice?.offerId || choice?.skill || choice?.attr) return true;
   if(state.turn % 12 === 0) return true;   // 每隔 12 幕补一次完整规则，其余回合用精简规则省上下文
   if(isPaymentInquiry(choice)) return true;
-  if((state.consequences||[]).some(c=>c.status==="pending" && Number.isFinite(c.due) && c.due-state.turn<=1)) return true;
+  // 到期后果由状态上下文和精简规则承接，不再因为「有后果将在下一幕到期」就整幕塞满完整规则
   const deadlines = (state.plot?.conflict||"")+" "+(state.plot?.next||"");
   return /限时|截止|关柜|打烊|换班|倒计时|还剩|来不及|(?:[零一二两三四五六七八九十]{1,3}|\d{1,2})(?:点|时|:\d\d)/.test(deadlines);
 }
@@ -3177,10 +3203,20 @@ function choiceSetIssue(scene){
   const kinds = choices.map(choiceKindOf).filter(Boolean);
   const distinct = new Set(kinds);
   if(kinds.length>=2 && distinct.size<2){
-    const only = CHOICE_KIND_LABELS[[...distinct][0]] || "同一种";
-    return "本幕三个选项的性质完全一样（都是「"+only+"」）。请至少把其中一项换成另一种性质——"
-      +CHOICE_KINDS.filter(k=>k!==[...distinct][0]).map(k=>"「"+CHOICE_KIND_LABELS[k]+"」").join(" 或 ")
-      +"——不要只换措辞。";
+    // 同性质但做法/对象明显不同时不再退回重写：三个「打听」如果分别问不同的人、
+    // 用不同办法，玩家体验上仍是三条不同的路。只有措辞也高度相似才重写。
+    let maxSim = 0;
+    for(let i=0;i<choices.length;i++){
+      for(let j=i+1;j<choices.length;j++){
+        maxSim = Math.max(maxSim, textSimilarity(String(choices[i].text||""),String(choices[j].text||"")));
+      }
+    }
+    if(maxSim>=0.55){
+      const only = CHOICE_KIND_LABELS[[...distinct][0]] || "同一种";
+      return "本幕三个选项的性质完全一样（都是「"+only+"」）。请至少把其中一项换成另一种性质——"
+        +CHOICE_KINDS.filter(k=>k!==[...distinct][0]).map(k=>"「"+CHOICE_KIND_LABELS[k]+"」").join(" 或 ")
+        +"——不要只换措辞。";
+    }
   }
   const hasCost = choices.some(c=>c.cost
     || /花|付|费|钱|文|银|两|得罪|欠|人情|受伤|风险|代价|错过|失去|被记|暴露|惊动|消耗|拖到|迟到|违约|惹/.test(String(c.tradeoff||"")));
@@ -3496,6 +3532,7 @@ function readScene(raw){
   } : null;
   return {
     lines, ending, plot, chapter, loopsAdd, loopsDone, present, characters, environment, effects:readEffects(obj.effects),
+    clockCheck:short(obj.clockCheck,20),
     dailyDecision, hasDailyDecision:point!=null,
     ...readNpcPlans(obj,short),
     promiseDone:Array.isArray(obj.promiseDone) ? obj.promiseDone.slice(0,6)
@@ -3871,8 +3908,8 @@ function continuingTurnRules(){
     "你主持文字 RPG。延续本局已成立的事实、人物档案、时间和承诺。玩家只决定自己的言行；NPC 按各自性格、所知、关系和作息行动。指定对话对象时由对方先回应，在场其他人可插话或行动。只裁定玩家尝试了什么及实际结果，不代玩家补台词。",
     "只输出一个完整 JSON 对象。先写 narration，再写 choices，再写 beats 和有变化的状态。故事尚未结束时 choices 必填，给 2～3 条可马上尝试的具体行动，每条写明对象、线索或办法。写完选项再补人物和环境状态。不要复述玩家输入或已知背景。",
     "普通回合的 narration 控制在 250~400 字，beats 3~4 条且每条不超过 55 字，choices 2~3 条且每条不超过 40 字；不要输出未变化的人物完整档案、重复环境说明、寒暄、复述玩家输入或零增量字段；每个 beat 都必须推进信息、关系或行动。整个 JSON 尽量控制在 1000 个汉字以内。只有关键转折、战斗、亲密或结局才展开到 900 字以上。宁可少而准，不要长而空；每一句都要推进画面、关系或线索。",
-    '格式示例（仅示范三个选项如何分化性质并交代代价）：{"narration":"掌柜把借据压在灯下。窗外雨还没停，门边的渡工正准备出门。","beats":[{"kind":"say","who":"渡工","text":"我只等你一炷香。"}],"choices":[{"text":"请掌柜指出借据上的签名，再决定要不要付钱","kind":"probe","tradeoff":"可核对债主，可能错过这班渡船","cost":"可能错过末班船"},{"text":"把借据拍在桌上，逼掌柜当场改口","kind":"risk","tradeoff":"能逼出真话，也可能当场翻脸","cost":"得罪掌柜，之后难再赊账"},{"text":"收起借据，先去渡口问末班船的时辰","kind":"wait","tradeoff":"先保住退路，借据的事要拖到明天","cost":"账目的事拖到明天"}],"environment":{"elapsedMinutes":2}}。',
-    '主要字段：narration:string，beats:[{kind:"say"或"action",who,text,to?}]，choices:[{text,kind:"probe"/"risk"/"wait",tradeoff?,cost?,attr?,skill?,effect?}]，advance:string（实质推进，闲谈可省略），plot:{goal,conflict,next}，summary:string（短摘要），present:[姓名]。重要线索、变化和不可逆事实可分别写 memoryAdd、consequence:{fact,followUp} 和 anchorAdd。到期后续视为已发生；实际阻止未到期后续才用 avert:[{id,reason}]。核心冲突确实收束才填 end:{good,title,text}。',
+    '格式示例（仅示范三个选项如何分化性质并交代代价）：{"narration":"掌柜把借据压在灯下。窗外雨还没停，门边的渡工正准备出门。","beats":[{"kind":"say","who":"渡工","text":"我只等你一炷香。"}],"choices":[{"text":"请掌柜指出借据上的签名，再决定要不要付钱","kind":"probe","tradeoff":"可核对债主，可能错过这班渡船","cost":"可能错过末班船"},{"text":"把借据拍在桌上，逼掌柜当场改口","kind":"risk","tradeoff":"能逼出真话，也可能当场翻脸","cost":"得罪掌柜，之后难再赊账"},{"text":"收起借据，先去渡口问末班船的时辰","kind":"wait","tradeoff":"先保住退路，借据的事要拖到明天","cost":"账目的事拖到明天"}],"clockCheck":"21:35","environment":{"elapsedMinutes":2}}。',
+    '主要字段：narration:string，beats:[{kind:"say"或"action",who,text,to?}]，choices:[{text,kind:"probe"/"risk"/"wait",tradeoff?,cost?,attr?,skill?,effect?}]，advance:string（实质推进，闲谈可省略），clockCheck:string（本幕结束时的当地 HH:MM，与 environment 一致），plot:{goal,conflict,next}，summary:string（短摘要），present:[姓名]。重要线索、变化和不可逆事实可分别写 memoryAdd、consequence:{fact,followUp} 和 anchorAdd。到期后续视为已发生；实际阻止未到期后续才用 avert:[{id,reason}]。核心冲突确实收束才填 end:{good,title,text}。',
     "characters 只写新角色和变化，沿用固定姓名。同一人物必须始终使用第一次出现的姓名：不要因为身份、亲属关系或称呼变化就另建「周妻 / 周账房之妻」「小厮 / 跑堂小厮」这样的重复角色；已知人物一律沿用原名，把新信息写进 change、knows 或 attitude。新主角配背景 background、个性 personality、爱好 hobby、说话习惯 voice、长期目标 goal、眼下打算 agenda、职业 job、身份 identity 和作息 routine，并尽量一次给全年龄、性别、物种、外貌、衣着、身高、体重、财产与武力。用 knows、attitude、links、hp、coin 等记录真实变化。玩家在「修订资料」里手动改过的人物字段是硬设定（profileEdits=true），必须沿用，尤其 goal 长期目标、agenda 眼下打算、attitude 对玩家态度：本幕的行动、语气和距离都要按它们写，不要改回旧设定或另写一套。普通寒暄可以自然停顿；当剧情停滞时安排会改变下一步的线索、人物决定或期限。",
     "environment:{elapsedMinutes,place?,weather?,conditions?,datetime?}，按实际耗时走，跨夜正常；首次建立时可给 time、datetime、era、background。离开时更新地点；输入只是询问或意愿，不当作已经执行。原著世界只在明确推进到新段落时填 worldProgress。",
     "effects 是实际净变化，可含 coin、hp、rep、aff、intimacy、desire、skills、attrs、health、debt、morality、wanted、stealth 和 social。关系与欲望分开，亲密仅限成年、自愿，按双方关系与场合渐进。属性和技能相关行动用 check:{attr 或 skill,result:'success'/'partial'/'fail',note}；按角色数值和准备情况裁定。伤病与负荷影响体力，体力归零可喘息、求助或撤退，不单独导致结局。",
@@ -3944,7 +3981,7 @@ function buildSystemPrompt(state,fullContext = !state.turn){
     "13g. 现实时间压力（超时推进）：当玩家迟迟不作回应时，剧情会自行推进，而不是永远停在原地等你。这时世界要按真实的因果自行发展：NPC 会因久等而失去耐心，态度变冷、催促、转身离开或另作打算；眼前的窗口期会关闭，机会溜走、货物卖给别人、约定作废；局势会自行恶化，敌人行动、危险逼近、时间流逝带来的后果照常发生。超时次数（idleCount）越多，NPC 越不耐烦、机会越少、局势越糟，态度与好感可因此下降，必要时也可结算体力、金币、声望等变化。请把这段沉默写成有后果的剧情，让玩家感到「不行动也是一种选择，而且往往是不利的选择」。",
     "13h. 多人在场与自由切换对话：当现场同时有多名 NPC 时，不要只围绕某一个「目标 NPC」打转。玩家可以自由选择与在场任何一人交谈，也可以对众人说话。若玩家指定了对话对象，让该对象作为主要回应者，但同时让在场的其他人保持在场感——他们可以旁听、插话、交换眼神、各自忙碌或对局势做出反应，而不是消失或沉默成背景板。若玩家没有指定对象，就根据话题与人物性格，让最相关的一两人自然接话，其余人可做简短反应。不同 NPC 对同一句话会有不同立场与反应，让场景像真实的多人在场，而不是一对一的舞台。玩家随时可以转向另一个人继续谈。",
     "13j. 人物要有生活感，目的性别太强：NPC 不是任务发布器或剧情推进工具，他们是活生生的人，有自己的日子、心情和闲事。不要每次见面就直奔主题、三句话就把委托塞给玩家、句句都往任务目标上引。允许寒暄、跑题、抱怨天气、聊些无关的闲话、说起自己的烦心事、被手头的活计打断、犹豫着不肯直说、答非所问、或者干脆先顾自己的事。玩家可以慢慢了解一个人，而不是被立刻推向某个目标。人物的目标要藏在日常的言行与情绪里，通过相处逐渐显露，而不是一开口就摊牌。让对话有喘息和岔路，玩家愿意的话可以一直闲聊下去，也可以自己主动切入正题。但要注意：生活感是用来给主线增色的，不能拿无关闲聊去替代剧情前进；闲笔也要暗含钩子或后果，且不要连续多幕都只停留在这类日常里——见好就收，让主线重新攥住节奏。犹豫与回避不能成为默认反应：除非性格确实极度内敛或当前有明显顾虑，否则被明确追问、被追求、关系升温时，要给清晰的态度与行动，不要反复「答非所问、把话悬着」。",
-    '{"consequence":{"fact":"本轮已经改变的局势","followUp":"两幕后可观察的变化，可留空"},"advance":"本幕让主线发生的关键变化，没有实质推进则留空字符串","check":{"attr":"敏捷","result":"partial","note":"勉强稳住身形，但惊动了对方"},"narration":"旁白","beats":[{"kind":"action","who":"角色名","text":"此人实际做出的动作"},{"kind":"say","who":"角色名","to":"台词对象，可省略","text":"台词"}],"choices":[{"text":"选项","tradeoff":"眼下可判断的取舍","attr":"可选：依赖的属性，如 敏捷","skill":"可选：依赖的技能，如 开锁"},{"text":"另一个选项","tradeoff":"另一条路的代价"}],"effects":{"coin":0,"hp":0,"rep":0},"scene":"当前场景一句话摘要","environment":{"time":"21:30","elapsedMinutes":5,"datetime":{"year":2026,"month":1,"day":1,"hour":21,"minute":30,"second":0},"era":"时代与地区","background":"长期适用的当地背景","place":"地点","weather":"天气或外部环境","conditions":"现场情况"},"present":["幕末仍在场的角色姓名，不含玩家"],"entered":["本幕新进场的角色姓名，可为空数组"],"left":["本幕离开的角色姓名，可为空数组"],"memoryAdd":["本轮新增的关键事实"],"summary":"截至目前剧情概要","end":null}',
+    '{"consequence":{"fact":"本轮已经改变的局势","followUp":"两幕后可观察的变化，可留空"},"advance":"本幕让主线发生的关键变化，没有实质推进则留空字符串","check":{"attr":"敏捷","result":"partial","note":"勉强稳住身形，但惊动了对方"},"narration":"旁白","beats":[{"kind":"action","who":"角色名","text":"此人实际做出的动作"},{"kind":"say","who":"角色名","to":"台词对象，可省略","text":"台词"}],"choices":[{"text":"选项","tradeoff":"眼下可判断的取舍","attr":"可选：依赖的属性，如 敏捷","skill":"可选：依赖的技能，如 开锁"},{"text":"另一个选项","tradeoff":"另一条路的代价"}],"effects":{"coin":0,"hp":0,"rep":0},"clockCheck":"21:30","scene":"当前场景一句话摘要","environment":{"time":"21:30","elapsedMinutes":5,"datetime":{"year":2026,"month":1,"day":1,"hour":21,"minute":30,"second":0},"era":"时代与地区","background":"长期适用的当地背景","place":"地点","weather":"天气或外部环境","conditions":"现场情况"},"present":["幕末仍在场的角色姓名，不含玩家"],"entered":["本幕新进场的角色姓名，可为空数组"],"left":["本幕离开的角色姓名，可为空数组"],"memoryAdd":["本轮新增的关键事实"],"summary":"截至目前剧情概要","end":null}',
      "effects 填写 coin、hp、rep 的整数净变化（本轮确实没有对应变化时填 0；rested:true 时可省略 hp，由游戏补算恢复），并可选择性填写 morality（道德，正善负恶）、wanted（通缉度，仅在有人实际报警且执法方介入时增加，无人追究或躲避风声/贿赂销案时可为负）、stealth（隐蔽度，遮掩行迹时增加）、coverUp（销毁证据/灭口/施压压下报警，1~100 为力度，可加 coverUpWho 指定针对的报案者）、aff（对某角色的好感增减，键为角色姓名；正值为亲近，负值为疏远，范围 -100~100，背叛、失言、见死不救、冒犯或伤害对方要如实给负值，例如 aff:{\"布兰\":-12}）、intimacy（对某角色的亲密度增减，键为角色姓名）、health（健康增减）、debt（债务增减）、skills（技能熟练度增减，键为技能名）、social（社会关系网新增或变更，[{name,relation,power,attitude}]）。即使这是第一幕，只要玩家已经发了台词或做了行动，也要结算实际发生的后果；只有自动开场或确实没有对应变化时才填 0。自由对话示例：玩家讨要欠款，角色当场给了 5 枚金币，coin 必须是 5；若角色只答应明天给，coin 是 0。玩家帮助弱者，morality 可为 +5；玩家动手伤人且被目击并报官，morality -8、wanted +10；若无人报警或官府不管，wanted 为 0。玩家乔装潜入无人仓库作案，可 stealth +10；玩家威胁报案者让其闭嘴，coverUp +20 并 morality -10。玩家与角色有亲密互动时，intimacy 增加该角色亲密度（注意：系统会按当前好感与亲密度层级限制单幕增幅，层级未到时大幅增长会被截断，请让亲密进展自然递进）。玩家练习开锁成功，skills 可给 {\"开锁\":5}；受伤感染，health -10；借钱度日，debt +20；结识一位有势力的靠山，social 加入 {name,relation,power,attitude}。欲望用 desire（玩家「性」欲的增减）或 drives（{\"money\":5,\"power\":-3,\"sex\":8,\"people\":4,\"items\":0}，玩家五维欲望的增减）；满足对应欲望时给负值使其下降。不要给未选中的选项预先结算。choices 里每个选项可带一个可选的 effect 字段（如 {\"coin\":-5}），仅用于向玩家预告该选项的预期代价（金币/体力），应与玩家选中后实际结算的结果大致相符，不要夸大或与 effects 矛盾。",
     '在同一个 JSON 对象里加入 "advance":"本幕让主线发生的关键变化（一句话，例如「揭穿了管事的谎言」「拿到了后屋的钥匙」）；如果本幕确实没有任何实质推进、只是原地闲聊或反复打听，就填空字符串" 和 "plot":{"goal":"主线目标","conflict":"当前阻力","next":"眼前可以做的事"} 和 "characters":[{"name":"固定姓名","background":"已揭示的过去与身份","personality":"性格特点","hobby":"具体爱好","job":"谋生的工作或身份","identity":"身份与处境（首次登场时写，一句话）","routine":"日常作息，什么时候做什么、何时忙/何时闲","voice":"称呼、语气或句式习惯","goal":"个人动机","agenda":"眼前最想做成的一件事","attitude":"对玩家的态度","change":"本轮的原因和具体变化","knows":"此人掌握的相关事实和来源","memories":[{"turn":3,"text":"此人亲历或知道的一件重要事"}],"age":30,"gender":"女","species":"人类/动物/外星人/妖怪/机械/AI 等（非人写清形态）","appearance":"可观察外貌：发型发色、眼睛、肤色、体型、疤痕/义肢/非人特征","origin":"国别/地域/族裔/时代（奇幻写地域或族裔）","outfit":"当前衣着、制服、盔甲或随身装备","height":175,"weight":65,"tie":"与玩家的长期关系（家人/伴侣/盟友/宿敌/死对头/债主/上司等，可选）","hp":100,"dead":false,"wealth":"财产状况","birth":{"year":1990,"month":3,"day":12,"hour":8,"minute":0,"second":0},"incomePlan":{"type":"monthly","amount":3000,"payday":5,"source":"工钱","sharedWith":""},"savings":0,"assets":[{"type":"farmland","name":"两亩水田","value":200,"output":{"coin":0,"food":2},"upkeep":{"coin":0,"food":0}}],"food":0,"coin":0,"rep":0,"moral":0,"wanted":0,"transient":false,"adult":true,"kinks":["性癖偏好"],"intimacy":0,"desire":0,"links":[{"name":"另一位角色姓名","relation":"旧识/恋人/仇敌/主仆","aff":50,"desire":30}],"combat":{"power":50,"energy":60,"energyMax":60,"techniques":[{"name":"绝技名","desc":"效果与代价","cost":10,"power":20}]}}]}。没有人物变化时 characters 可为空数组。玩家独处时 present 填 []。present 只填幕末仍在场者；本幕有人进场填 entered，有人离开填 left。job、routine、age、gender、species、tie、hp、dead、wealth、coin、income、rep、moral、wanted、adult、kinks、intimacy、desire、links 是幕后的角色属性，用于驱动其行为，玩家不可见；只在首次登场或实际变化时填写。adult 标明是否成年；kinks 是该角色的性癖偏好列表；intimacy 是与玩家的亲密度；desire 是该角色当前的欲望（0~100，与好感独立）；links 是该角色与其他 NPC 之间的关系、好感与欲望。',
     '同时可选加入 "questAdd":[{"id":"内部任务标识","title":"内部任务名（仅供你记账，玩家不可见）","desc":"你内部记录的表面目标或线索","secret":"真正的达成条件或内情","reward":{"coin":10,"rep":3}}],"questDone":["已完成的任务标识"],"questDrop":["玩家拒绝或放弃的任务标识"],"items":[{"name":"物品名","desc":"用途或外观","value":20,"effect":{"hp":15,"skills":{"开锁":5}},"consumable":true}],"abilities":["新掌握的能力"],"anchorAdd":["必须始终成立、不可违背或遗忘的核心事实"]。物品尽量带 desc/value/effect/consumable，让玩家能真正使用；只有纯线索可以只写名称字符串。任务系统对玩家完全不可见，不要在剧情里提及；玩家可以不理会任务，NPC 不要反复催办。可以同时下发多个任务。没有时分别留空数组或省略。',

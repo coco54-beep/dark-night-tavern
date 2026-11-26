@@ -296,7 +296,7 @@ function dailyPaceFor(state,choice,keyScene){
   if(waitChoice){
     const maxMinutes = mode==="slow" ? 30 : 60;
     return {maxMinutes,condensed:false,expectProgress:true,
-      expectOutcome:!choice.speech && !choice.idle && Boolean(state.dailyDecision || choice.tradeoff),
+      expectOutcome:false,
       prompt:"【等待的后果】玩家选择了等待或暂不动手。这不是放弃，也不是原地空等：本幕必须让时间真正走一段（至少 15 分钟），并写出这段时间里别人做了什么——在场的 NPC 去办事、先一步行动、改变条件或托人带话，不在场的人也可以让机会被别人拿走。用 environment.elapsedMinutes 填实际耗时（15 到 "+maxMinutes+" 分钟），至少一条 beats 写 NPC 主动做的事或传来的消息，并写清等待带来的可见变化（消息、期限、人物态度或局势），plot.next 换成变化后的下一步。不要再给「继续等」「再观察」这类原地选项。"
       +DAILY_CHOICE_GUIDANCE+DAILY_DECISION_GUIDANCE};
   }
@@ -304,7 +304,12 @@ function dailyPaceFor(state,choice,keyScene){
   const actionOnly = /^[（(][^）)]+[）)]$/.test(text);
   const actionText = actionOnly ? text.slice(1,-1).trim() : text;
   const routineAction = /^(?:我(?:先|就|去)?\s*)?(?:继续)?(?:照常|照旧|做完|完成|忙完|收拾|整理|打扫|洗衣|洗碗|散步|走回|回家|赶路|吃完|休息|去休息|等候|再等|等一会)/.test(actionText);
-  const talking = !choice.idle && ((choice.speech && !actionOnly && (choice.target || !routineAction || /[？?]/.test(text)))
+  // 纯对话/表态类选项：玩家只是把话说明白，不强迫模型再补一段 consequence.fact，
+  // 否则每两三幕就会为「这句话带来了什么结果」重写一次。
+  const speechChoice = /^(?:我|先|就|直接|干脆|照实|如实|坦白|低声|轻声|当面)?\s*(?:说|问|答|告诉|解释|反问|劝|请求|拒绝|答应|表明|坦白|承认|否认|提醒|安慰|道歉|喊|叫|开口|回(?:答|应)?)/.test(actionText)
+    || /[“”"]/.test(text);
+  const talking = !choice.idle && (speechChoice
+    || (choice.speech && !actionOnly && (choice.target || !routineAction || /[？?]/.test(text)))
     || /^(?:开口|向.{1,12}(?:询问|问|打听)|与.{1,12}(?:交谈|聊天)|聊聊|询问|问问|打听|打招呼)/.test(actionText));
   const pending = state.dailyDecision;
   const important = keyScene || pending || importantPaceChoice(choice,state);
@@ -336,7 +341,7 @@ function dailyPaceFor(state,choice,keyScene){
     ? "把原本会拆成四到五轮的琐碎过程合在这一幕。用简短过渡连接已选行动、结果和后续变化。遇到亲密、关键线索或新决定时，停下来细写并交还选择权。"
     : "";
   return {maxMinutes,condensed,expectProgress:condensed && !talking && !choice.idle,
-    expectOutcome:!choice.speech && !choice.idle && Boolean(pending || choice.tradeoff),
+    expectOutcome:!choice.speech && !choice.idle && !speechChoice && Boolean(pending || choice.tradeoff),
     prompt:"【日常剧情节奏】"+guidance+density
     +" 按实际经过填写整数 environment.elapsedMinutes（0 到 "+maxMinutes+" 分钟），旁白与时间一致。"
     +(Number.isFinite(deadline) && deadline-state.environment.minute-1===maxMinutes
@@ -639,7 +644,8 @@ async function aiTurn(choice,retry=null){
   }
   const returnToChoices = ()=>showCurrentScene($("action-text").value || speech?.text);
   const memoryFirst = typeof memoryFirstForState==="function" ? memoryFirstForState(state) : false;
-  const prior = state.history.slice(memoryFirst ? -10 : -16);
+  const historyWindow = memoryFirst || state.turn>=60 ? -10 : state.turn>=30 ? -12 : -16;
+  const prior = state.history.slice(historyWindow);
   if(prior.at(-1)?.role==="user") prior.pop();
   const fullContext = requiresFullTurnContext(state,choice);
   const recent = fullContext ? fullContextMessages(prior) : recentStoryMessages(prior);
@@ -817,7 +823,7 @@ async function aiTurn(choice,retry=null){
         ? formatStoryTime(state.environment.minute,state) : "";
       if(clockText && list.length){
         list.splice(list.length-1,0,labelPrompt("rules",{role:"system",content:
-          "【此刻时间】现在是 "+clockText+"。本幕旁白、人物作息和期限都必须与这个时刻一致；如果写到傍晚、入夜、第二天等时间变化，必须同时用 environment.elapsedMinutes 推进到那个时刻。"}));
+          "【此刻时间】现在是 "+clockText+"。本幕旁白、人物作息和期限都必须与这个时刻一致；如果写到傍晚、入夜、第二天等时间变化，必须同时用 environment.elapsedMinutes 推进到那个时刻。并在 JSON 顶层用 clockCheck 写本幕结束时的当地时刻 HH:MM。"}));
       }
       const changeLine = typeof goalChangePrompt==="function" ? goalChangePrompt(state) : null;
       if(changeLine && list.length) list.splice(list.length-1,0,labelPrompt("rules",{role:"system",content:changeLine}));
@@ -969,10 +975,12 @@ async function aiTurn(choice,retry=null){
       // 玩家刚拒绝过大跳时也要查：否则模型会停在「不多走一分钟、但旁白还是夜里」的状态。
       if((attempt===0 || holdTime) && !timeSkip && !waitMinutes && !scene.ending && !bigJump){
         const timeIssue = typeof timeOfDayMismatch==="function" ? timeOfDayMismatch(scene,environment,state) : "";
-        if(timeIssue){
-          lastErr = new Error(timeIssue);
+        const clockIssue = typeof clockCheckMismatch==="function" ? clockCheckMismatch(scene,environment,state) : "";
+        const issue = [timeIssue,clockIssue].filter(Boolean).join("；");
+        if(issue){
+          lastErr = new Error(issue);
           if(attempt>=maxAttempts-1) break;
-          markRetry("time-of-day",timeIssue);
+          markRetry(clockIssue ? "clock-check" : "time-of-day",issue);
           const pv = $("stream-preview");
           if(pv) pv.textContent = retryText("正在校准本幕时刻",maxAttempts);
           continue;

@@ -860,12 +860,24 @@ async function requestSceneImage(){
 
 function showSettings(){
   const card = $("card");
+  const activeTheme = currentTheme();
+  const themeButtons = THEMES.map(t=>`
+    <button type="button" class="theme-btn${t.id===activeTheme?" active":""}" id="theme-${t.id}" data-theme="${t.id}" aria-pressed="${t.id===activeTheme?"true":"false"}">
+      <span class="theme-swatches">${t.colors.map(c=>`<i style="background:${c}"></i>`).join("")}</span>
+      <span class="theme-name">${escapeHtml(t.name)}</span>
+      <span class="theme-desc">${escapeHtml(t.desc)}</span>
+    </button>`).join("");
   card.innerHTML = `
     <div class="home">
       <header class="home-header"><h1>设置</h1></header>
       <div class="settings-list">
         <button class="big-btn ghost" id="settings-ai">我的 AI 设置<small>API 地址、模型与密钥</small></button>
         <button class="big-btn ghost" id="settings-image">图像设置<small>Qwen 配图与 ComfyUI 连接</small></button>
+      </div>
+      <div class="settings-themes">
+        <div class="settings-label">界面主题</div>
+        <div class="theme-grid" id="theme-grid">${themeButtons}</div>
+        <p class="form-note">主题会立即生效，并记住在这台设备上。</p>
       </div>
       <label class="check-line"><input type="checkbox" id="settings-idle-auto" ${idleAutoEnabled()?"checked":""}> 90 秒无操作自动推进剧情（关闭后不会超时结束）</label>
       <label class="check-line"><input type="checkbox" id="settings-story-full" ${storyDetailFull()?"checked":""}> 每幕使用完整叙事规则（更细，切换后下一幕生效）</label>
@@ -878,6 +890,14 @@ function showSettings(){
     </div>`;
   $("settings-ai").onclick = ()=>showPersonalAI(showSettings);
   $("settings-image").onclick = ()=>showImageSettings(showSettings);
+  for(const t of THEMES){
+    const btn = $("theme-"+t.id);
+    if(btn) btn.onclick = ()=>{
+      applyTheme(t.id);
+      const note = $("settings-note");
+      if(note) note.textContent = "已切换主题："+t.name+"。";
+    };
+  }
   $("settings-idle-auto").onchange = e=>{
     setIdleAutoEnabled(e.target.checked);
     if(!e.target.checked) clearIdleTimer();
